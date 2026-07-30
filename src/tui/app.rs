@@ -1508,12 +1508,10 @@ impl App {
                     self.input_mode = InputMode::AddTarget;
                 }
             }
-            InputMode::AddTarget => {
-                if !self.input.is_empty() {
-                    self.new_tunnel_target = Some(self.input.clone());
-                    self.input.clear();
-                    self.input_mode = InputMode::AddZone;
-                }
+            InputMode::AddTarget if !self.input.is_empty() => {
+                self.new_tunnel_target = Some(self.input.clone());
+                self.input.clear();
+                self.input_mode = InputMode::AddZone;
             }
             _ => {}
         }
@@ -2177,15 +2175,16 @@ async fn run_app(
                                 app.check_health().await;
                             }
                         }
-                        KeyCode::Char(';') => {
-                            if !app.demo_guard() {
-                                // Cycle to next account
-                                if app.accounts.len() > 1 {
-                                    app.next_account();
-                                    if let Err(e) = app.load_tunnels().await {
-                                        app.status_message = Some(format!("Error: {}", e));
-                                    }
-                                }
+                        // Cycle to the next account. The guard is deliberately
+                        // side-effecting: demo_guard sets the "actions
+                        // disabled" status message when it returns true, and
+                        // short-circuiting keeps it evaluated first. Either way
+                        // a non-match falls through to `_ => {}`, so the
+                        // message still shows and nothing else runs.
+                        KeyCode::Char(';') if !app.demo_guard() && app.accounts.len() > 1 => {
+                            app.next_account();
+                            if let Err(e) = app.load_tunnels().await {
+                                app.status_message = Some(format!("Error: {}", e));
                             }
                         }
                         _ => {}
