@@ -254,11 +254,66 @@ pub fn ensure_logs_dir() -> Result<PathBuf> {
     Ok(logs_dir)
 }
 
-// Generate the cloudflared config YAML content for a tunnel
+// Emit a scalar YAML value for a TunnelOptionValue in double-quoted style
+// for strings (safe against YAML type coercion; e.g. "yes"/"no"/"on"/"off"/"1.0"
+// being parsed as bools or numbers in YAML 1.1). Booleans and integers are bare.
+fn yaml_scalar(value: &TunnelOptionValue) -> String {
+    match value {
+        TunnelOptionValue::Bool(b) => b.to_string(),
+        TunnelOptionValue::Int(n) => n.to_string(),
+        TunnelOptionValue::String(s) => yaml_quote(s),
+        TunnelOptionValue::List(_) => {
+            // Lists are emitted as block sequences by the caller, not as scalars.
+            String::new()
+        }
+    }
+}
+
+// Wrap a string in YAML double-quoted style with proper escaping.
+fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str(r#"\""#),
+            '\n' => out.push_str(r"\n"),
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// Write a (key, value) pair from an option map into an in-progress YAML
+// string at the given indent. Handles scalars and lists.
+fn write_yaml_option(
+    out: &mut String,
+    key: &str,
+    value: &TunnelOptionValue,
+    indent: usize,
+) {
+    use std::fmt::Write;
+    let pad = " ".repeat(indent);
+    match value {
+        TunnelOptionValue::Bool(_) | TunnelOptionValue::Int(_) | TunnelOptionValue::String(_) => {
+            let _ = writeln!(out, "{pad}{key}: {}", yaml_scalar(value));
+        }
+        TunnelOptionValue::List(items) => {
+            let _ = writeln!(out, "{pad}{key}:");
+            for item in items {
+                let _ = writeln!(out, "{pad}  - {}", yaml_quote(item));
+            }
+        }
+    }
+}
+
+// Generate the cloudflared config YAML content for a tunnel.
 pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
     let credentials_path = tunnel.credentials_path()?;
 
-    // Normalize target URL
     let target_url =
         if tunnel.target.starts_with("http://") || tunnel.target.starts_with("https://") {
             tunnel.target.clone()
@@ -266,21 +321,23 @@ pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
             format!("http://{}", tunnel.target)
         };
 
-    let config = format!(
-        r#"tunnel: {tunnel_id}
-credentials-file: {credentials_path}
-ingress:
-  - hostname: {hostname}
-    service: {target_url}
-  - service: http_status:404
-"#,
-        tunnel_id = tunnel.tunnel_id,
-        credentials_path = credentials_path.display(),
-        hostname = tunnel.hostname,
-        target_url = target_url
-    );
+    let mut out = String::new();
+    use std::fmt::Write;
+    let _ = writeln!(out, "tunnel: {}", tunnel.tunnel_id);
+    let _ = writeln!(out, "credentials-file: {}", credentials_path.display());
 
-    Ok(config)
+    // Top-level tunnel options, alphabetized (BTreeMap iteration order).
+    for (key, value) in &tunnel.tunnel_options {
+        write_yaml_option(&mut out, key, value, 0);
+    }
+
+    let _ = writeln!(out, "ingress:");
+    let _ = writeln!(out, "  - hostname: {}", tunnel.hostname);
+    let _ = writeln!(out, "    service: {}", target_url);
+    // originRequest attaches here in Task 3.
+    let _ = writeln!(out, "  - service: http_status:404");
+
+    Ok(out)
 }
 
 // Write the cloudflared config file for a tunnel
@@ -337,5 +394,94 @@ mod tests {
         assert!(matches!(deserialized.get("retries"), Some(TunnelOptionValue::Int(5))));
         assert!(matches!(deserialized.get("no-autoupdate"), Some(TunnelOptionValue::Bool(true))));
         assert!(matches!(deserialized.get("features"), Some(TunnelOptionValue::List(v)) if v.len() == 2));
+    }
+
+    fn sample_tunnel() -> PersistentTunnel {
+        PersistentTunnel {
+            name: "demo".into(),
+            account_name: "acct".into(),
+            target: "http://localhost:3000".into(),
+            zone_id: "zone123".into(),
+            zone_name: "example.com".into(),
+            hostname: "demo.example.com".into(),
+            tunnel_id: "uuid-1".into(),
+            enabled: true,
+            auto_start: false,
+            metrics_port: Some(21000),
+            tunnel_options: BTreeMap::new(),
+            origin_request: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn empty_options_produces_legacy_shape() {
+        let tunnel = sample_tunnel();
+        let yaml = generate_tunnel_config(&tunnel).expect("generate");
+
+        // Must contain the original core lines, unchanged.
+        assert!(yaml.starts_with("tunnel: uuid-1\n"), "unexpected start:\n{yaml}");
+        assert!(yaml.contains("\ncredentials-file: "), "missing credentials-file:\n{yaml}");
+        assert!(yaml.contains("\ningress:\n"), "missing ingress:\n{yaml}");
+        assert!(
+            yaml.contains("\n  - hostname: demo.example.com\n    service: http://localhost:3000\n"),
+            "unexpected ingress rule shape:\n{yaml}"
+        );
+        assert!(yaml.contains("\n  - service: http_status:404\n"), "missing catch-all:\n{yaml}");
+
+        // Must NOT include any advanced-options artifacts when both maps empty.
+        assert!(!yaml.contains("originRequest"), "unexpected originRequest key");
+        for key in ["loglevel", "protocol", "retries"] {
+            assert!(
+                !yaml.contains(&format!("\n{key}:")),
+                "unexpected top-level key {key} in empty-options output:\n{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn tunnel_options_render_as_top_level_yaml_keys() {
+        let mut tunnel = sample_tunnel();
+        tunnel.tunnel_options.insert("loglevel".into(), TunnelOptionValue::String("debug".into()));
+        tunnel.tunnel_options.insert("retries".into(), TunnelOptionValue::Int(5));
+        tunnel.tunnel_options.insert("no-autoupdate".into(), TunnelOptionValue::Bool(true));
+        tunnel.tunnel_options.insert(
+            "features".into(),
+            TunnelOptionValue::List(vec!["diag-http".into(), "diag-mem".into()]),
+        );
+
+        let yaml = generate_tunnel_config(&tunnel).unwrap();
+
+        // Strings are double-quoted (safe against YAML type coercion).
+        assert!(yaml.contains("\nloglevel: \"debug\"\n"), "loglevel line missing:\n{yaml}");
+        // Ints and bools are emitted bare.
+        assert!(yaml.contains("\nretries: 5\n"), "retries line missing:\n{yaml}");
+        assert!(yaml.contains("\nno-autoupdate: true\n"), "bool line missing:\n{yaml}");
+        // Lists get a block-style sequence with quoted string items.
+        assert!(
+            yaml.contains("\nfeatures:\n  - \"diag-http\"\n  - \"diag-mem\"\n"),
+            "list serialization wrong:\n{yaml}"
+        );
+
+        // Top-level options must appear BEFORE ingress:.
+        let features_pos = yaml.find("\nfeatures:").expect("features line");
+        let ingress_pos = yaml.find("\ningress:").expect("ingress line");
+        assert!(features_pos < ingress_pos, "options must precede ingress");
+    }
+
+    #[test]
+    fn yaml_string_escapes_special_chars() {
+        let mut tunnel = sample_tunnel();
+        tunnel.tunnel_options.insert(
+            "label".into(),
+            // Value contains a backslash and a double-quote.
+            TunnelOptionValue::String(r#"weird\value"here"#.into()),
+        );
+
+        let yaml = generate_tunnel_config(&tunnel).unwrap();
+        // Both special chars should be escaped in double-quoted YAML style.
+        assert!(
+            yaml.contains(r#"label: "weird\\value\"here""#),
+            "escaping wrong:\n{yaml}"
+        );
     }
 }
