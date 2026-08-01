@@ -221,64 +221,6 @@ async fn import_tunnel_op(
     Ok(name)
 }
 
-// Standalone async operation: edit a tunnel (retained for potential future use)
-#[allow(dead_code, clippy::too_many_arguments)]
-async fn edit_tunnel_op(
-    name: String,
-    new_target: String,
-    new_zone: config::ZoneConfig,
-    original_zone_id: String,
-    original_hostname: String,
-    tunnel_id: String,
-    was_running: bool,
-    account: Account,
-) -> Result<String> {
-    let client = cloudflare::Client::new(&account.api_token);
-
-    // Compute new hostname
-    let new_hostname = format!("{}.{}", name, new_zone.name);
-    let zone_changed = new_zone.id != original_zone_id;
-
-    // If zone changed, handle DNS records
-    if zone_changed {
-        // Delete old DNS record
-        client
-            .delete_dns_record(&original_zone_id, &original_hostname)
-            .await
-            .ok(); // Log but continue
-
-        // Create new DNS record
-        client
-            .ensure_dns_record(&new_zone.id, &new_hostname, &tunnel_id)
-            .await?;
-    }
-
-    // Update state
-    let mut state = TunnelState::load()?;
-    if let Some(tunnel) = state.find_mut(&name) {
-        tunnel.target = new_target;
-        tunnel.zone_id = new_zone.id;
-        tunnel.zone_name = new_zone.name;
-        tunnel.hostname = new_hostname;
-    }
-    state.save()?;
-
-    // Regenerate config YAML
-    if let Some(tunnel) = state.find(&name) {
-        write_tunnel_config(tunnel)?;
-
-        // Reinstall daemon with updated config
-        daemon::install_daemon(tunnel).await?;
-
-        // Restart daemon if it was running
-        if was_running {
-            daemon::start_daemon(&name, &account.name).await?;
-        }
-    }
-
-    Ok(name)
-}
-
 // Standalone async operation: delete a tunnel
 async fn delete_tunnel_op(
     name: String,
@@ -354,6 +296,47 @@ async fn save_edit_sheet(app: &mut App) {
     }
 
     let tunnel_name = sheet.tunnel_name.clone();
+
+    // Zone change: reconcile DNS records BEFORE writing new state to disk
+    // (so if DNS fails we haven't persisted a broken hostname).
+    if let Some(new_zone) = &sheet.pending_zone {
+        let account = match app.current_account() {
+            Some(a) => a.clone(),
+            None => {
+                app.status_message = Some("No active account for DNS reconciliation.".into());
+                return;
+            }
+        };
+        let client = crate::cloudflare::Client::new(&account.api_token);
+        // Delete old record (log-and-continue).
+        let _ = client
+            .delete_dns_record(&sheet.original_zone_id, &sheet.original_hostname)
+            .await;
+        // Compute new hostname and create new record.
+        let new_hostname = format!("{}.{}", sheet.tunnel_name, new_zone.name);
+        // Need tunnel_id — fetch from state.
+        let state = match crate::state::TunnelState::load() {
+            Ok(s) => s,
+            Err(e) => {
+                app.status_message = Some(format!("Failed to load tunnel state: {e}"));
+                return;
+            }
+        };
+        let tunnel_id = match state.find(&sheet.tunnel_name).map(|t| t.tunnel_id.clone()) {
+            Some(id) => id,
+            None => {
+                app.status_message = Some("Tunnel not found in state.".into());
+                return;
+            }
+        };
+        if let Err(e) = client
+            .ensure_dns_record(&new_zone.id, &new_hostname, &tunnel_id)
+            .await
+        {
+            app.status_message = Some(format!("Zone change failed (DNS): {e}. Config not saved."));
+            return;
+        }
+    }
 
     // Load state, apply sheet, save
     let mut state = match crate::state::TunnelState::load() {
@@ -564,6 +547,7 @@ pub enum InputMode {
     EditSheetInput { yaml_key: String, buffer: String },
     EditSheetBasicInput { field: crate::tui::edit_sheet::BasicField, buffer: String },
     EditSheetPicker { yaml_key: String, cursor: usize },
+    EditSheetZonePicker { cursor: usize },
     EditSheetConfirmDiscard,
     Confirm,
     Help,
@@ -2578,7 +2562,27 @@ async fn run_app(
                                                 };
                                             }
                                             1 => {
-                                                app.status_message = Some("Zone changes not supported in edit sheet — delete and recreate the tunnel to change zones.".to_string());
+                                                // Zone: open picker over app.zones.
+                                                if app.zones.is_empty() {
+                                                    app.status_message = Some(
+                                                        "No zones available for this account.".to_string(),
+                                                    );
+                                                } else {
+                                                    let cursor = app
+                                                        .edit_sheet
+                                                        .as_ref()
+                                                        .and_then(|s| {
+                                                            // Preselect current zone if present in list.
+                                                            let cur_id = s.pending_zone
+                                                                .as_ref()
+                                                                .map(|z| z.id.as_str())
+                                                                .unwrap_or(s.original_zone_id.as_str());
+                                                            app.zones.iter().position(|z| z.id == cur_id)
+                                                        })
+                                                        .unwrap_or(0);
+                                                    app.input_mode =
+                                                        InputMode::EditSheetZonePicker { cursor };
+                                                }
                                             }
                                             2 => {
                                                 // Toggle auto_start in-place; no sub-modal.
@@ -2696,6 +2700,39 @@ async fn run_app(
                         }
                         KeyCode::Enter => {
                             commit_picker_edit(app);
+                            app.input_mode = InputMode::EditSheet;
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditSheetZonePicker { .. } => match key.code {
+                        KeyCode::Esc => app.input_mode = InputMode::EditSheet,
+                        KeyCode::Up => {
+                            if let InputMode::EditSheetZonePicker { cursor } = &mut app.input_mode {
+                                *cursor = cursor.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let InputMode::EditSheetZonePicker { cursor } = &mut app.input_mode {
+                                if *cursor + 1 < app.zones.len() {
+                                    *cursor += 1;
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let InputMode::EditSheetZonePicker { cursor } = &app.input_mode {
+                                let idx = *cursor;
+                                if let Some(zone) = app.zones.get(idx).cloned() {
+                                    if let Some(s) = app.edit_sheet.as_mut() {
+                                        // Only stage if different from original.
+                                        if zone.id == s.original_zone_id {
+                                            s.pending_zone = None;
+                                        } else {
+                                            s.pending_zone = Some(zone);
+                                            s.dirty = true;
+                                        }
+                                    }
+                                }
+                            }
                             app.input_mode = InputMode::EditSheet;
                         }
                         _ => {}

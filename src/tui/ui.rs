@@ -102,6 +102,7 @@ pub fn render(f: &mut Frame, app: &App) {
         | InputMode::EditSheetInput { .. }
         | InputMode::EditSheetBasicInput { .. }
         | InputMode::EditSheetPicker { .. }
+        | InputMode::EditSheetZonePicker { .. }
         | InputMode::EditSheetConfirmDiscard => {
             if let Some(sheet) = app.edit_sheet.as_ref() {
                 crate::tui::edit_sheet::render(f, f.area(), sheet);
@@ -619,6 +620,9 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::EditSheetPicker { .. } => {
             " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
         }
+        InputMode::EditSheetZonePicker { .. } => {
+            " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
+        }
         InputMode::EditSheetConfirmDiscard => " y: discard   n/Esc: keep editing".to_string(),
         InputMode::Confirm => " y confirm  n/Esc cancel".to_string(),
         InputMode::Help => " Press Esc or ? to close help".to_string(),
@@ -761,16 +765,26 @@ fn basic_field_human_name(field: crate::tui::edit_sheet::BasicField) -> &'static
 }
 
 fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
+    let yellow = Style::default().fg(Color::Yellow);
+    let bold_yellow = yellow.add_modifier(Modifier::BOLD);
+    let padding = ratatui::widgets::Padding::new(2, 2, 1, 1);
     match &app.input_mode {
         InputMode::EditSheetBasicInput { field, buffer } => {
             let area = centered_rect(50, 20, f.area());
             f.render_widget(Clear, area);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" Edit: {} ", basic_field_human_name(*field)));
+                .border_style(yellow)
+                .title(Span::styled(
+                    format!(" Edit: {} ", basic_field_human_name(*field)),
+                    bold_yellow,
+                ))
+                .padding(padding);
             let inner = block.inner(area);
             f.render_widget(block, area);
-            let p = Paragraph::new(buffer.as_str()).wrap(Wrap { trim: false });
+            let p = Paragraph::new(buffer.as_str())
+                .style(Style::default().fg(Color::Green))
+                .wrap(Wrap { trim: false });
             f.render_widget(p, inner);
         }
         InputMode::EditSheetInput { yaml_key, buffer } => {
@@ -778,7 +792,9 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
             f.render_widget(Clear, area);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" Edit: {} ", yaml_key));
+                .border_style(yellow)
+                .title(Span::styled(format!(" Edit: {} ", yaml_key), bold_yellow))
+                .padding(padding);
             let inner = block.inner(area);
             f.render_widget(block, area);
             if buffer.is_empty() {
@@ -789,7 +805,9 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
                     f.render_widget(p, inner);
                 }
             } else {
-                let p = Paragraph::new(buffer.as_str()).wrap(Wrap { trim: false });
+                let p = Paragraph::new(buffer.as_str())
+                    .style(Style::default().fg(Color::Green))
+                    .wrap(Wrap { trim: false });
                 f.render_widget(p, inner);
             }
         }
@@ -802,7 +820,9 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
             f.render_widget(Clear, area);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" Choose: {} ", yaml_key));
+                .border_style(yellow)
+                .title(Span::styled(format!(" Choose: {} ", yaml_key), bold_yellow))
+                .padding(padding);
             let inner = block.inner(area);
             f.render_widget(block, area);
             let items: Vec<ListItem> = choices
@@ -810,24 +830,67 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
                 .enumerate()
                 .map(|(i, c)| {
                     let display = if c.is_empty() { "(unset)" } else { c };
-                    let marker = if i == *cursor { "› " } else { "  " };
-                    ListItem::new(format!("{}{}", marker, display))
+                    let is_sel = i == *cursor;
+                    let marker = if is_sel { "› " } else { "  " };
+                    let style = if is_sel {
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    ListItem::new(Span::styled(format!("{}{}", marker, display), style))
                 })
                 .collect();
             f.render_widget(List::new(items), inner);
         }
-        InputMode::EditSheetConfirmDiscard => {
-            let area = centered_rect(40, 15, f.area());
+        InputMode::EditSheetZonePicker { cursor } => {
+            let area = centered_rect(40, 60, f.area());
             f.render_widget(Clear, area);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Discard changes? ");
+                .border_style(yellow)
+                .title(Span::styled(
+                    " Choose zone ",
+                    bold_yellow,
+                ))
+                .padding(padding);
             let inner = block.inner(area);
             f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("You have unsaved edits.\n\n[y]es  [n]o / Esc"),
-                inner,
-            );
+            let items: Vec<ListItem> = app.zones.iter().enumerate().map(|(i, z)| {
+                let is_sel = i == *cursor;
+                let marker = if is_sel { "› " } else { "  " };
+                let style = if is_sel {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                ListItem::new(Span::styled(format!("{}{}", marker, z.name), style))
+            }).collect();
+            f.render_widget(List::new(items), inner);
+        }
+        InputMode::EditSheetConfirmDiscard => {
+            let area = centered_rect(40, 20, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(" Discard changes? ", bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let lines = vec![
+                Line::from(Span::styled(
+                    "You have unsaved edits.",
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("[y]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw("es discard   "),
+                    Span::styled("[n]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw("o / Esc keep editing"),
+                ]),
+            ];
+            f.render_widget(Paragraph::new(lines), inner);
         }
         _ => {}
     }
