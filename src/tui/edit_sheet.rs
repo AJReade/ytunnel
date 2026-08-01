@@ -152,9 +152,24 @@ impl EditSheetState {
     }
 
     pub fn clear_selected(&mut self) {
-        // Rows 0 and 1 are ytunnel settings — no-op (they always have a value).
-        if self.selected_row < 2 {
-            return;
+        // Rows 0 and 1 are ytunnel settings — reset to their defaults:
+        // auto_start = false, metrics_port = None (auto-assigned).
+        match self.selected_row {
+            0 => {
+                if self.auto_start {
+                    self.auto_start = false;
+                    self.dirty = true;
+                }
+                return;
+            }
+            1 => {
+                if self.metrics_port.is_some() {
+                    self.metrics_port = None;
+                    self.dirty = true;
+                }
+                return;
+            }
+            _ => {}
         }
         let options_idx = self.selected_row - 2;
         if let Some(row) = self.advanced_rows.get_mut(options_idx) {
