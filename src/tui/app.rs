@@ -346,6 +346,13 @@ async fn delete_tunnel_op(
 // Save the edit sheet state: apply to tunnel, persist to disk, reload daemon if running
 async fn save_edit_sheet(app: &mut App) {
     let Some(sheet) = app.edit_sheet.clone() else { return };
+
+    if !sheet.dirty {
+        app.edit_sheet = None;
+        app.input_mode = InputMode::Normal;
+        return;
+    }
+
     let tunnel_name = sheet.tunnel_name.clone();
 
     // Load state, apply sheet, save
@@ -1605,6 +1612,7 @@ impl App {
 
     // Start the edit tunnel flow — opens the two-tab edit sheet overlay
     pub fn start_edit(&mut self) {
+        self.status_message = None;
         if self.config.is_none() {
             self.status_message = Some("Run 'ytunnel init' first".to_string());
             return;
@@ -2523,6 +2531,7 @@ async fn run_app(
                             } else {
                                 app.edit_sheet = None;
                                 app.input_mode = InputMode::Normal;
+                                app.status_message = None;
                             }
                         }
                         KeyCode::Tab | KeyCode::BackTab => {
@@ -2569,11 +2578,7 @@ async fn run_app(
                                                 };
                                             }
                                             1 => {
-                                                let buffer = s.zone_name.clone();
-                                                app.input_mode = InputMode::EditSheetBasicInput {
-                                                    field: BasicField::Zone,
-                                                    buffer,
-                                                };
+                                                app.status_message = Some("Zone changes not supported in edit sheet — delete and recreate the tunnel to change zones.".to_string());
                                             }
                                             2 => {
                                                 // Toggle auto_start in-place; no sub-modal.
@@ -2699,6 +2704,7 @@ async fn run_app(
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
                             app.edit_sheet = None;
                             app.input_mode = InputMode::Normal;
+                            app.status_message = None;
                         }
                         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                             app.input_mode = InputMode::EditSheet;

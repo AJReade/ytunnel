@@ -219,7 +219,10 @@ fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
         Line::from(vec![
             Span::raw(marker(1)),
             Span::styled("Zone:         ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(&sheet.zone_name),
+            Span::styled(
+                format!("{} (read-only)", sheet.zone_name),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::raw(marker(2)),
