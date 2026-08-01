@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{App, HealthStatus, InputMode, TunnelKind};
+use super::app::{App, Focus, HealthStatus, InputMode, TunnelKind};
 use crate::metrics::TunnelMetrics;
 use crate::state::TunnelStatus;
 
@@ -143,12 +143,16 @@ fn render_help_modal(f: &mut Frame) {
         )),
         Line::from(""),
         Line::from(vec![
+            Span::styled("  Tab      ", Style::default().fg(Color::Cyan)),
+            Span::raw("Switch focus between tunnel list and log pane"),
+        ]),
+        Line::from(vec![
             Span::styled("  ↑/k      ", Style::default().fg(Color::Cyan)),
-            Span::raw("Move selection up"),
+            Span::raw("Move selection up (or scroll logs when log pane focused)"),
         ]),
         Line::from(vec![
             Span::styled("  ↓/j      ", Style::default().fg(Color::Cyan)),
-            Span::raw("Move selection down"),
+            Span::raw("Move selection down (or scroll logs when log pane focused)"),
         ]),
         Line::from(vec![
             Span::styled("  q        ", Style::default().fg(Color::Cyan)),
@@ -340,11 +344,16 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let tunnels_border_style = if app.focus == Focus::Tunnels {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let tunnels_list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(tunnels_border_style),
     );
 
     f.render_widget(tunnels_list, area);
@@ -363,10 +372,15 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let all_lines: Vec<String> = if log_mode == crate::state::LogMode::NgrokDev {
-        let filtered: Vec<String> = raw_lines.iter()
-            .filter_map(|l| crate::tui::log_filter::parse_line(l))
-            .map(|req| crate::tui::log_filter::format_ngrok(&req))
+        let mut filter = crate::tui::log_filter::NgrokDevFilter::new();
+        let mut filtered: Vec<String> = raw_lines.iter()
+            .filter_map(|l| filter.process_line(l))
             .collect();
+        filtered.extend(filter.flush_pending());
+        if !filtered.is_empty() {
+            filtered.insert(0, format!("{}  {:<6} {:<50}  {:<5}  {}", "time    ", "method", "path", "code", "bytes"));
+            filtered.insert(1, format!("{}  {:<6} {:<50}  {:<5}  {}", "────────", "──────", "──────────────────────────────────────────────────", "─────", "─────"));
+        }
         if filtered.is_empty() && !raw_lines.is_empty() {
             vec!["(ngrok-dev: no HTTP requests yet — hit a URL on your tunnel to see them appear)".to_string()]
         } else {
@@ -396,8 +410,13 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!(" Logs{} ({} — scrolled, End to follow) ", mode_tag, total)
     };
+    let logs_border_style = if app.focus == Focus::Logs {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let logs = Paragraph::new(log_lines)
-        .block(Block::default().borders(Borders::ALL).title(title));
+        .block(Block::default().borders(Borders::ALL).border_style(logs_border_style).title(title));
     f.render_widget(logs, area);
 }
 
@@ -574,7 +593,7 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
     let help_text = match app.input_mode {
         InputMode::Normal => {
             if app.demo {
-                " (demo) \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit"
+                " (demo) Tab:focus  \u{2191}\u{2193}/jk navigate  [c]opy  [r]efresh  [?]help  [q]uit"
                     .to_string()
             } else {
                 // Show different help based on whether an ephemeral tunnel is selected
@@ -593,11 +612,11 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
 
                 if is_ephemeral {
                     format!(
-                        " [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
+                        " Tab:focus [m]anage [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit",
                         account_hint
                     )
                 } else {
-                    format!(" [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
+                    format!(" Tab:focus [a]dd [e]dit [s]tart [S]top [R]estart [A]utostart [c]opy [o]pen [h]ealth [d]elete [r]efresh{} [?]help [q]uit", account_hint)
                 }
             }
         }

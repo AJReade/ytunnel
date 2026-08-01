@@ -557,6 +557,13 @@ fn parse_ephemeral_config(tunnel_id: &str) -> Option<(String, String)> {
     }
 }
 
+// Which pane currently has keyboard focus in Normal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Tunnels,
+    Logs,
+}
+
 // Input mode for the TUI
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
@@ -764,6 +771,8 @@ pub struct App {
     pub demo: bool,
     // State for the two-tab edit sheet overlay
     pub edit_sheet: Option<crate::tui::edit_sheet::EditSheetState>,
+    // Which pane has keyboard focus in Normal mode.
+    pub focus: Focus,
 }
 
 // Actions that require confirmation
@@ -816,6 +825,7 @@ impl App {
             spinner: Spinner::new(),
             demo: false,
             edit_sheet: None,
+            focus: Focus::Tunnels,
         }
     }
 
@@ -865,6 +875,7 @@ impl App {
             spinner: Spinner::new(),
             demo: true,
             edit_sheet: None,
+            focus: Focus::Tunnels,
         }
     }
 
@@ -2366,17 +2377,37 @@ async fn run_app(
                         KeyCode::Char('?') => {
                             app.input_mode = InputMode::Help;
                         }
+                        KeyCode::Tab => {
+                            app.focus = match app.focus {
+                                Focus::Tunnels => Focus::Logs,
+                                Focus::Logs => Focus::Tunnels,
+                            };
+                        }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            if app.select_previous()
-                                && !app.demo
-                                && app.selected_needs_health_check()
-                            {
-                                app.check_health().await;
+                            match app.focus {
+                                Focus::Tunnels => {
+                                    if app.select_previous()
+                                        && !app.demo
+                                        && app.selected_needs_health_check()
+                                    {
+                                        app.check_health().await;
+                                    }
+                                }
+                                Focus::Logs => {
+                                    app.scroll_logs_up(1);
+                                }
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if app.select_next() && !app.demo && app.selected_needs_health_check() {
-                                app.check_health().await;
+                            match app.focus {
+                                Focus::Tunnels => {
+                                    if app.select_next() && !app.demo && app.selected_needs_health_check() {
+                                        app.check_health().await;
+                                    }
+                                }
+                                Focus::Logs => {
+                                    app.scroll_logs_down(1);
+                                }
                             }
                         }
                         // Cycle to the next account. The guard is deliberately

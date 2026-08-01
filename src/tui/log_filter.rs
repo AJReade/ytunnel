@@ -1,11 +1,15 @@
 // Parses cloudflared log lines into compact per-request rows for ngrok-dev mode.
 //
-// At DBG level cloudflared emits:
-//   2026-08-01T22:42:33Z DBG GET https://host/path?... HTTP/1.1 connIndex=1 ... path=/live/longpoll
+// At DBG level cloudflared emits both request and response lines:
+//   Request:  2026-08-01T22:42:33Z DBG GET https://host/path HTTP/1.1 connIndex=1 ... path=/live/longpoll
+//   Response: 2026-08-01T22:42:33Z DBG 200 OK connIndex=1 content-length=246 ...
 // At any level, failed requests emit:
 //   2026-08-01T22:42:33Z ERR Request failed error="..." connIndex=0 dest=https://... type=http
 //
-// parse_line extracts the interesting bits; format_ngrok renders a fixed-width row.
+// parse_line + format_ngrok: legacy stateless API kept for backward compat.
+// NgrokDevFilter: stateful filter that pairs request+response by connIndex.
+
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRequest {
@@ -147,6 +151,124 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+// Stateful filter that pairs cloudflared request/response events on connIndex.
+// One instance per render pass (recreated fresh; not persisted between renders).
+pub struct NgrokDevFilter {
+    // FIFO queue of pending requests keyed by connIndex.
+    pending: HashMap<u32, VecDeque<PendingRequest>>,
+}
+
+struct PendingRequest {
+    time: String,
+    method: String,
+    path: String,
+}
+
+impl NgrokDevFilter {
+    pub fn new() -> Self {
+        Self { pending: HashMap::new() }
+    }
+
+    // Process one raw cloudflared log line. Returns Some(formatted_line) if this
+    // event completes a request/response pair (or is an error). Returns None for
+    // request lines that stash themselves waiting for a response, and for
+    // non-request/non-response noise.
+    pub fn process_line(&mut self, line: &str) -> Option<String> {
+        let (ts, rest) = line.split_once(' ')?;
+        let time = extract_hhmmss(ts)?;
+        let (level, rest) = rest.split_once(' ')?;
+        match level {
+            "DBG" => self.process_dbg(&time, rest),
+            "ERR" if rest.starts_with("Request failed") => Some(self.process_err_request_failed(&time, rest)),
+            _ => None,
+        }
+    }
+
+    // Emit any requests still waiting for a response (called after all lines
+    // processed). Format: same as paired-line but with [pending] status.
+    pub fn flush_pending(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        // Sort by time so pending entries appear chronologically.
+        let mut all: Vec<PendingRequest> = self.pending.drain()
+            .flat_map(|(_, q)| q.into_iter())
+            .collect();
+        all.sort_by(|a, b| a.time.cmp(&b.time));
+        for req in all {
+            out.push(format_pair(&req.time, &req.method, &req.path, "[pending]", None));
+        }
+        out
+    }
+
+    fn process_dbg(&mut self, time: &str, rest: &str) -> Option<String> {
+        let (first, rest) = rest.split_once(' ')?;
+        if is_http_method(first) {
+            // Request line: METHOD URL HTTP/x.x key=value...
+            let (_url, rest) = rest.split_once(' ')?;
+            let (_httpver, kv_str) = rest.split_once(' ')?;
+            let path = extract_kv(kv_str, "path").unwrap_or_else(|| "?".into());
+            let conn_index = extract_kv(kv_str, "connIndex").and_then(|s| s.parse::<u32>().ok())?;
+            self.pending.entry(conn_index).or_default().push_back(PendingRequest {
+                time: time.to_string(),
+                method: first.to_string(),
+                path,
+            });
+            None
+        } else if is_status_code(first) {
+            // Response line: STATUS TEXT... connIndex=... content-length=...
+            let status = first.to_string();
+            let conn_index = extract_kv(rest, "connIndex").and_then(|s| s.parse::<u32>().ok());
+            let content_length = extract_kv(rest, "content-length").and_then(|s| s.parse::<u64>().ok());
+            let paired = conn_index.and_then(|i| self.pending.get_mut(&i).and_then(|q| q.pop_front()));
+            Some(match paired {
+                Some(req) => format_pair(&req.time, &req.method, &req.path, &status, content_length),
+                None => format!("{}  ??????                                          {}  {}B  (orphan)",
+                    time, status, content_length.map(|n| n.to_string()).unwrap_or_default()),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn process_err_request_failed(&mut self, time: &str, rest: &str) -> String {
+        let error = extract_kv(rest, "error").unwrap_or_default();
+        let dest = extract_kv(rest, "dest").unwrap_or_default();
+        let path = url_to_path(&dest).unwrap_or_else(|| dest.clone());
+        let conn_index = extract_kv(rest, "connIndex").and_then(|s| s.parse::<u32>().ok());
+        // Consume any pending on this conn since it's the one that failed.
+        if let Some(i) = conn_index {
+            if let Some(q) = self.pending.get_mut(&i) {
+                q.pop_front();
+            }
+        }
+        format_error(time, &path, &error)
+    }
+}
+
+fn is_status_code(s: &str) -> bool {
+    s.len() == 3 && s.chars().all(|c| c.is_ascii_digit())
+}
+
+// Format one paired request/response line.
+fn format_pair(time: &str, method: &str, path: &str, status: &str, bytes: Option<u64>) -> String {
+    let bytes_str = bytes.map(|n| format!("{}B", n)).unwrap_or_default();
+    format!("{}  {:<6} {:<50}  {:<5}  {}",
+        time,
+        method,
+        truncate(path, 50),
+        status,
+        bytes_str,
+    )
+}
+
+fn format_error(time: &str, path: &str, error: &str) -> String {
+    format!("{}  {:<6} {:<50}  ERROR  {}",
+        time,
+        "???",
+        truncate(path, 50),
+        truncate(error, 40),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +384,68 @@ mod tests {
         };
         let out = format_ngrok(&req);
         assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn pairs_request_and_response_on_same_conn_index() {
+        let mut f = NgrokDevFilter::new();
+        // Request comes first — returns None (stashed).
+        let req_line = r#"2026-08-01T23:18:38Z DBG GET https://host/live/longpoll HTTP/1.1 connIndex=3 content-length=0 event=1 path=/live/longpoll"#;
+        assert!(f.process_line(req_line).is_none());
+        // Response follows — returns paired line.
+        let resp_line = r#"2026-08-01T23:18:38Z DBG 200 OK connIndex=3 content-length=246 event=1 ingressRule=0 originService=http://local"#;
+        let out = f.process_line(resp_line).unwrap();
+        assert!(out.contains("GET"), "missing method: {out}");
+        assert!(out.contains("/live/longpoll"), "missing path: {out}");
+        assert!(out.contains("200"), "missing status: {out}");
+        assert!(out.contains("246B"), "missing bytes: {out}");
+    }
+
+    #[test]
+    fn preserves_fifo_order_within_same_conn_index() {
+        let mut f = NgrokDevFilter::new();
+        // Two requests on same conn.
+        f.process_line(r#"2026-08-01T23:18:38Z DBG GET https://h/a HTTP/1.1 connIndex=3 event=1 path=/a"#);
+        f.process_line(r#"2026-08-01T23:18:38Z DBG POST https://h/b HTTP/1.1 connIndex=3 event=1 path=/b"#);
+        // First response — should pair with FIRST request (GET /a).
+        let out1 = f.process_line(r#"2026-08-01T23:18:38Z DBG 200 OK connIndex=3 content-length=1 event=1"#).unwrap();
+        assert!(out1.contains("GET"), "should pair with GET: {out1}");
+        assert!(out1.contains("/a"), "should have first path: {out1}");
+        // Second response — should pair with SECOND request (POST /b).
+        let out2 = f.process_line(r#"2026-08-01T23:18:38Z DBG 200 OK connIndex=3 content-length=2 event=1"#).unwrap();
+        assert!(out2.contains("POST"), "should pair with POST: {out2}");
+        assert!(out2.contains("/b"), "should have second path: {out2}");
+    }
+
+    #[test]
+    fn flush_pending_emits_stashed_requests() {
+        let mut f = NgrokDevFilter::new();
+        f.process_line(r#"2026-08-01T23:18:38Z DBG GET https://h/a HTTP/1.1 connIndex=3 event=1 path=/a"#);
+        let flushed = f.flush_pending();
+        assert_eq!(flushed.len(), 1);
+        assert!(flushed[0].contains("[pending]"), "expected [pending]: {}", flushed[0]);
+        assert!(flushed[0].contains("/a"));
+        // Second flush is empty.
+        assert!(f.flush_pending().is_empty());
+    }
+
+    #[test]
+    fn error_request_failed_emits_error_line_and_pops_pending() {
+        let mut f = NgrokDevFilter::new();
+        // Stash a pending request on conn=0.
+        f.process_line(r#"2026-08-01T23:18:38Z DBG GET https://h/a HTTP/1.1 connIndex=0 event=1 path=/a"#);
+        let err_line = r#"2026-08-01T23:18:38Z ERR Request failed error="context canceled" connIndex=0 dest=https://h/a type=http"#;
+        let out = f.process_line(err_line).unwrap();
+        assert!(out.contains("ERROR"), "missing ERROR: {out}");
+        assert!(out.contains("context canceled"));
+        // Pending should now be empty for that conn.
+        assert!(f.flush_pending().is_empty());
+    }
+
+    #[test]
+    fn response_without_matching_request_marked_orphan() {
+        let mut f = NgrokDevFilter::new();
+        let out = f.process_line(r#"2026-08-01T23:18:38Z DBG 200 OK connIndex=99 content-length=10 event=1"#).unwrap();
+        assert!(out.contains("orphan"), "expected orphan marker: {out}");
     }
 }
