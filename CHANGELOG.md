@@ -1,5 +1,14 @@
 ## Changelog
 
+### Unreleased
+
+- **Advanced tunnel options** — new two-tab edit sheet (Basic / Advanced) lets you configure ~30 cloudflared options per tunnel, including `httpHostHeader`, `noTLSVerify`, `protocol`, `loglevel`, `retries`, `edge-ip-version`, `features`, `grace-period`, and origin-request tuning. Settings persist in `tunnels.toml` and are written into the generated cloudflared YAML.
+- **Immediate reload on save** — pressing `Ctrl+S` in the edit sheet reloads the running daemon (`launchctl kickstart -k` on macOS, `systemctl --user restart` on Linux) so config changes take effect without a manual restart.
+- **Edit UI overhaul** — replaces the previous target → zone chained modal with a single overlay sheet. Press `e` on a tunnel to open, `Tab` to switch between Basic and Advanced, `Ctrl+S` to save, `Esc` to cancel (with dirty-state confirm).
+- **YAML generator extended** — top-level cloudflared options and per-ingress `originRequest` blocks are now emitted when set. Tunnels with no advanced options still produce byte-identical legacy YAML output.
+- **Zone editing temporarily disabled** — the Basic tab shows the current zone as read-only. Changing zones requires re-creating the tunnel until the DNS reconciliation pipeline is wired into the new save flow.
+- No new dependencies added.
+
 ### v0.8.0
 
 - **Self-update** (`ytunnel update`) — checks GitHub Releases for the latest version and replaces the binary in-place. Detects Homebrew and cargo installs and suggests the appropriate upgrade command instead
