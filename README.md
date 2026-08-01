@@ -218,7 +218,7 @@ Tunnels continue running in the background after you close the TUI.
 
 Press `e` on a selected tunnel to open the edit sheet:
 
-- **Basic tab** — target URL, zone (read-only for now), auto-start toggle, metrics port
+- **Basic tab** — target URL, zone (picker; changes trigger Cloudflare DNS reconciliation), auto-start toggle, metrics port
 - **Advanced tab** — ~30 cloudflared options like `httpHostHeader`, `noTLSVerify`, `protocol`, `loglevel`, `retries`, `edge-ip-version`, origin-request tuning
 
 Sheet keybindings:
