@@ -1,5 +1,6 @@
 mod cli;
 mod cloudflare;
+mod cloudflared_options;
 mod config;
 mod daemon;
 mod metrics;
