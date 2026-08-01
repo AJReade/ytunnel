@@ -98,8 +98,15 @@ pub fn render(f: &mut Frame, app: &App) {
             app.is_importing,
         ),
         InputMode::AddZone => render_zone_dialog(f, app),
-        InputMode::EditTarget => render_edit_dialog(f, app, "Edit target URL:"),
-        InputMode::EditZone => render_edit_zone_dialog(f, app),
+        InputMode::EditSheet
+        | InputMode::EditSheetInput { .. }
+        | InputMode::EditSheetPicker { .. }
+        | InputMode::EditSheetConfirmDiscard => {
+            if let Some(sheet) = app.edit_sheet.as_ref() {
+                crate::tui::edit_sheet::render(f, f.area(), sheet);
+            }
+            render_sheet_modal_overlays(f, app);
+        }
         InputMode::Confirm => {
             if let Some(ref msg) = app.confirm_message {
                 render_confirm_dialog(f, msg);
@@ -587,8 +594,14 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
             " Enter value, then press Enter. Esc to cancel.".to_string()
         }
         InputMode::AddZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
-        InputMode::EditTarget => " Edit target URL, then press Enter. Esc to cancel.".to_string(),
-        InputMode::EditZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
+        InputMode::EditSheet => " Tab: switch pane   Ctrl+S: save   Esc: cancel".to_string(),
+        InputMode::EditSheetInput { .. } => {
+            " Type value   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetPicker { .. } => {
+            " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetConfirmDiscard => " y: discard   n/Esc: keep editing".to_string(),
         InputMode::Confirm => " y confirm  n/Esc cancel".to_string(),
         InputMode::Help => " Press Esc or ? to close help".to_string(),
     };
@@ -719,126 +732,57 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
     f.render_widget(content, area);
 }
 
-fn render_edit_dialog(f: &mut Frame, app: &App, prompt: &str) {
-    let area = centered_rect(60, 30, f.area());
-
-    // Clear the area
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Edit Tunnel ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    f.render_widget(block, area);
-
-    // Build styled content showing tunnel being edited
-    let lines = vec![
-        Line::from(vec![
-            Span::raw("Editing: "),
-            Span::styled(
-                app.editing_tunnel_name.as_deref().unwrap_or(""),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(prompt, Style::default().fg(Color::Yellow))),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "> ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(&app.input, Style::default().fg(Color::Green)),
-            Span::styled("_", Style::default().fg(Color::White)),
-        ]),
-    ];
-
-    let text = Paragraph::new(lines)
-        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)));
-
-    f.render_widget(text, area);
-}
-
-fn render_edit_zone_dialog(f: &mut Frame, app: &App) {
-    let area = centered_rect(60, 50, f.area());
-
-    // Clear the area
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .title(" Edit: Select Zone ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-
-    f.render_widget(block, area);
-
-    // Build zone lines with selection indicator
-    let header_lines = 6; // Editing, Name, Target, empty, Select zone:, empty
-    let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::raw("Editing: "),
-            Span::styled(
-                app.editing_tunnel_name.as_deref().unwrap_or(""),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("New Target: "),
-            Span::styled(
-                app.new_tunnel_target.as_deref().unwrap_or(""),
-                Style::default().fg(Color::Green),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Select zone:",
-            Style::default().fg(Color::Yellow),
-        )),
-        Line::from(""),
-    ];
-
-    // Add zone options
-    for (i, zone) in app.zones.iter().enumerate() {
-        let selected = i == app.zone_selected;
-        let is_original = app.original_zone_id.as_deref() == Some(&zone.id);
-        let prefix = if selected { "> " } else { "  " };
-        let suffix = if is_original { " (current)" } else { "" };
-        let style = if selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}{}", prefix, zone.name, suffix),
-            style,
-        )));
-    }
-
-    // Calculate scroll to keep selected item visible
-    let available_height = area.height.saturating_sub(4) as usize;
-    let scroll = if available_height > header_lines {
-        let visible_zones = available_height - header_lines;
-        if app.zone_selected >= visible_zones {
-            (app.zone_selected - visible_zones + 1) as u16
-        } else {
-            0
+fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
+    match &app.input_mode {
+        InputMode::EditSheetInput { yaml_key, buffer } => {
+            let area = centered_rect(50, 20, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Edit: {} ", yaml_key));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let p = Paragraph::new(buffer.as_str()).wrap(Wrap { trim: false });
+            f.render_widget(p, inner);
         }
-    } else {
-        0
-    };
-
-    let content = Paragraph::new(lines)
-        .block(Block::default().padding(ratatui::widgets::Padding::new(2, 2, 1, 1)))
-        .scroll((scroll, 0));
-
-    f.render_widget(content, area);
+        InputMode::EditSheetPicker { yaml_key, cursor } => {
+            let Some(spec) = crate::cloudflared_options::find(yaml_key) else { return };
+            let crate::cloudflared_options::OptionKind::Enum { choices, .. } = &spec.kind else {
+                return;
+            };
+            let area = centered_rect(30, 40, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Choose: {} ", yaml_key));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let items: Vec<ListItem> = choices
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let display = if c.is_empty() { "(unset)" } else { c };
+                    let marker = if i == *cursor { "› " } else { "  " };
+                    ListItem::new(format!("{}{}", marker, display))
+                })
+                .collect();
+            f.render_widget(List::new(items), inner);
+        }
+        InputMode::EditSheetConfirmDiscard => {
+            let area = centered_rect(40, 15, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Discard changes? ");
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            f.render_widget(
+                Paragraph::new("You have unsaved edits.\n\n[y]es  [n]o / Esc"),
+                inner,
+            );
+        }
+        _ => {}
+    }
 }
 
 fn render_confirm_dialog(f: &mut Frame, message: &str) {

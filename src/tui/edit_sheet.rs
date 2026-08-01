@@ -127,6 +127,155 @@ impl EditSheetState {
     }
 }
 
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
+    Frame,
+};
+
+use crate::cloudflared_options::OptionKind;
+
+// Render the edit sheet as a centered overlay.
+pub fn render(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
+    let outer = centered_rect(70, 80, area);
+    f.render_widget(Clear, outer);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Edit tunnel: {} ", sheet.tunnel_name));
+    let inner = block.inner(outer);
+    f.render_widget(block, outer);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
+        .split(inner);
+
+    let titles = vec![Line::from("Basic"), Line::from("Advanced")];
+    let selected = match sheet.active_tab {
+        SheetTab::Basic => 0,
+        SheetTab::Advanced => 1,
+    };
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .block(Block::default().borders(Borders::BOTTOM));
+    f.render_widget(tabs, chunks[0]);
+
+    match sheet.active_tab {
+        SheetTab::Basic => render_basic(f, chunks[1], sheet),
+        SheetTab::Advanced => render_advanced(f, chunks[1], sheet),
+    }
+
+    let help = match sheet.active_tab {
+        SheetTab::Basic => "Tab: switch pane   Ctrl+S: save   Esc: cancel",
+        SheetTab::Advanced => "↑/↓: select   Enter: edit   d: clear   Tab: switch pane   Ctrl+S: save   Esc: cancel",
+    };
+    f.render_widget(
+        Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
+        chunks[2],
+    );
+}
+
+fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Target: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&sheet.target),
+        ]),
+        Line::from(vec![
+            Span::styled("Zone:   ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(&sheet.zone_name),
+        ]),
+        Line::from(vec![
+            Span::styled("Auto-start: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(if sheet.auto_start { "yes" } else { "no" }),
+        ]),
+        Line::from(vec![
+            Span::styled("Metrics port: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(
+                sheet.metrics_port.map(|p| p.to_string()).unwrap_or_else(|| "(auto)".into()),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_advanced(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut last_scope: Option<OptionScope> = None;
+
+    for (idx, row) in sheet.advanced_rows.iter().enumerate() {
+        if Some(row.spec.scope) != last_scope {
+            let header = match row.spec.scope {
+                OptionScope::Tunnel => "── Tunnel ──",
+                OptionScope::OriginRequest => "── Origin Request ──",
+            };
+            items.push(ListItem::new(Line::from(Span::styled(
+                header,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))));
+            last_scope = Some(row.spec.scope);
+        }
+
+        let value_display = match &row.value {
+            Some(v) => value_to_display(v),
+            None => match &row.spec.kind {
+                OptionKind::Bool { default } => format!("(default: {})", default),
+                OptionKind::Int { default: Some(n), .. } => format!("(default: {})", n),
+                OptionKind::String { default: Some(s), .. } => format!("(default: {})", s),
+                OptionKind::Duration { default: Some(s) } => format!("(default: {})", s),
+                OptionKind::Enum { default: Some(s), .. } => format!("(default: {})", s),
+                _ => "(unset)".to_string(),
+            },
+        };
+
+        let selected_marker = if idx == sheet.selected_row { "› " } else { "  " };
+        let line = Line::from(vec![
+            Span::raw(selected_marker),
+            Span::styled(
+                format!("{:<24}", row.spec.display_name),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(value_display),
+        ]);
+        items.push(ListItem::new(line));
+    }
+
+    f.render_widget(List::new(items).block(Block::default().borders(Borders::NONE)), area);
+}
+
+fn value_to_display(v: &crate::state::TunnelOptionValue) -> String {
+    use crate::state::TunnelOptionValue;
+    match v {
+        TunnelOptionValue::Bool(b) => b.to_string(),
+        TunnelOptionValue::Int(n) => n.to_string(),
+        TunnelOptionValue::String(s) => s.clone(),
+        TunnelOptionValue::List(items) => items.join(", "),
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

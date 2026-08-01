@@ -221,8 +221,8 @@ async fn import_tunnel_op(
     Ok(name)
 }
 
-// Standalone async operation: edit a tunnel
-#[allow(clippy::too_many_arguments)]
+// Standalone async operation: edit a tunnel (retained for potential future use)
+#[allow(dead_code, clippy::too_many_arguments)]
 async fn edit_tunnel_op(
     name: String,
     new_target: String,
@@ -343,6 +343,115 @@ async fn delete_tunnel_op(
     Ok(name)
 }
 
+// Save the edit sheet state: apply to tunnel, persist to disk, reload daemon if running
+async fn save_edit_sheet(app: &mut App) {
+    let Some(sheet) = app.edit_sheet.clone() else { return };
+    let tunnel_name = sheet.tunnel_name.clone();
+
+    // Load state, apply sheet, save
+    let mut state = match crate::state::TunnelState::load() {
+        Ok(s) => s,
+        Err(e) => {
+            app.status_message = Some(format!("Error: Failed to load tunnels.toml: {}", e));
+            return;
+        }
+    };
+
+    let cloned = {
+        let Some(tunnel) = state.find_mut(&tunnel_name) else {
+            app.status_message = Some(format!("Error: Tunnel '{}' not found", tunnel_name));
+            return;
+        };
+        sheet.apply(tunnel);
+        tunnel.clone()
+    };
+
+    if let Err(e) = state.save() {
+        app.status_message = Some(format!("Error: Failed to save tunnels.toml: {}", e));
+        return;
+    }
+    if let Err(e) = crate::state::write_tunnel_config(&cloned) {
+        app.status_message = Some(format!("Error: Failed to write YAML: {}", e));
+        return;
+    }
+    if let Err(e) = crate::daemon::reload_if_installed(&cloned).await {
+        app.status_message = Some(format!("Config saved; daemon reload failed: {}", e));
+    } else {
+        app.status_message = Some(format!("Tunnel '{}' updated", tunnel_name));
+    }
+    app.edit_sheet = None;
+    app.input_mode = InputMode::Normal;
+}
+
+fn commit_input_edit(app: &mut App) {
+    let InputMode::EditSheetInput { yaml_key, buffer } = &app.input_mode else { return };
+    let yaml_key = yaml_key.clone();
+    let buffer = buffer.clone();
+    let Some(spec) = crate::cloudflared_options::find(&yaml_key) else { return };
+    use crate::cloudflared_options::OptionKind;
+    use crate::state::TunnelOptionValue;
+
+    let parsed = match &spec.kind {
+        OptionKind::Int { .. } => match buffer.trim().parse::<i64>() {
+            Ok(n) => Some(TunnelOptionValue::Int(n)),
+            Err(_) => {
+                app.status_message = Some(format!("Error: Invalid integer: {}", buffer));
+                return;
+            }
+        },
+        OptionKind::String { .. } | OptionKind::Duration { .. } => {
+            if buffer.trim().is_empty() {
+                None
+            } else {
+                Some(TunnelOptionValue::String(buffer.trim().to_string()))
+            }
+        }
+        OptionKind::List { .. } => {
+            let items: Vec<String> = buffer
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if items.is_empty() { None } else { Some(TunnelOptionValue::List(items)) }
+        }
+        _ => None,
+    };
+
+    if let Some(v) = &parsed {
+        if let Err(e) = crate::cloudflared_options::validate_value(spec, v) {
+            app.status_message = Some(format!("Error: Validation failed: {}", e));
+            return;
+        }
+    }
+
+    if let Some(sheet) = app.edit_sheet.as_mut() {
+        if let Some(row) = sheet.advanced_rows.iter_mut().find(|r| r.spec.yaml_key == yaml_key) {
+            row.value = parsed;
+            sheet.dirty = true;
+        }
+    }
+}
+
+fn commit_picker_edit(app: &mut App) {
+    let InputMode::EditSheetPicker { yaml_key, cursor } = &app.input_mode else { return };
+    let yaml_key = yaml_key.clone();
+    let cursor = *cursor;
+    let Some(spec) = crate::cloudflared_options::find(&yaml_key) else { return };
+    let crate::cloudflared_options::OptionKind::Enum { choices, .. } = &spec.kind else { return };
+    let choice = choices[cursor].to_string();
+
+    if let Some(sheet) = app.edit_sheet.as_mut() {
+        if let Some(row) = sheet.advanced_rows.iter_mut().find(|r| r.spec.yaml_key == yaml_key) {
+            row.value = if choice.is_empty() {
+                None
+            } else {
+                Some(crate::state::TunnelOptionValue::String(choice))
+            };
+            sheet.dirty = true;
+        }
+    }
+}
+
 // Parse an ephemeral tunnel's config file to extract hostname and target
 fn parse_ephemeral_config(tunnel_id: &str) -> Option<(String, String)> {
     let config_dir = crate::config::config_dir().ok()?;
@@ -393,8 +502,10 @@ pub enum InputMode {
     AddName,
     AddTarget,
     AddZone,
-    EditTarget,
-    EditZone,
+    EditSheet,
+    EditSheetInput { yaml_key: String, buffer: String },
+    EditSheetPicker { yaml_key: String, cursor: usize },
+    EditSheetConfirmDiscard,
     Confirm,
     Help,
 }
@@ -582,6 +693,8 @@ pub struct App {
     pub spinner: Spinner,
     // Demo mode flag (synthetic data, no real API calls)
     pub demo: bool,
+    // State for the two-tab edit sheet overlay
+    pub edit_sheet: Option<crate::tui::edit_sheet::EditSheetState>,
 }
 
 // Actions that require confirmation
@@ -631,6 +744,7 @@ impl App {
             original_hostname: None,
             spinner: Spinner::new(),
             demo: false,
+            edit_sheet: None,
         }
     }
 
@@ -677,6 +791,7 @@ impl App {
             original_hostname: None,
             spinner: Spinner::new(),
             demo: true,
+            edit_sheet: None,
         }
     }
 
@@ -1436,7 +1551,7 @@ impl App {
         self.is_importing = false;
     }
 
-    // Start the edit tunnel flow
+    // Start the edit tunnel flow — opens the two-tab edit sheet overlay
     pub fn start_edit(&mut self) {
         if self.config.is_none() {
             self.status_message = Some("Run 'ytunnel init' first".to_string());
@@ -1458,33 +1573,9 @@ impl App {
             return;
         }
 
-        // Store original values for comparison/cleanup
-        self.editing_tunnel_name = Some(entry.tunnel.name.clone());
-        self.original_zone_id = Some(entry.tunnel.zone_id.clone());
-        self.original_hostname = Some(entry.tunnel.hostname.clone());
-
-        // Pre-fill input with current target
-        self.input = entry.tunnel.target.clone();
-
-        // Pre-select current zone in zone list
-        self.zone_selected = self
-            .zones
-            .iter()
-            .position(|z| z.id == entry.tunnel.zone_id)
-            .unwrap_or(0);
-
-        // Store tunnel name and start edit flow
-        self.new_tunnel_name = Some(entry.tunnel.name.clone());
-        self.input_mode = InputMode::EditTarget;
-    }
-
-    // Move to next step in edit flow (target -> zone)
-    pub fn next_edit_step(&mut self) {
-        if self.input_mode == InputMode::EditTarget && !self.input.is_empty() {
-            self.new_tunnel_target = Some(self.input.clone());
-            self.input.clear();
-            self.input_mode = InputMode::EditZone;
-        }
+        let tunnel = entry.tunnel.clone();
+        self.edit_sheet = Some(crate::tui::edit_sheet::EditSheetState::from_tunnel(&tunnel));
+        self.input_mode = InputMode::EditSheet;
     }
 
     // Cancel current input
@@ -1879,11 +1970,10 @@ async fn run_app(
 
             // Handle paste events (some remote desktop software sends text as paste)
             if let Event::Paste(text) = &event {
-                if matches!(
-                    app.input_mode,
-                    InputMode::AddName | InputMode::AddTarget | InputMode::EditTarget
-                ) {
+                if matches!(app.input_mode, InputMode::AddName | InputMode::AddTarget) {
                     app.input.push_str(text);
+                } else if let InputMode::EditSheetInput { buffer, .. } = &mut app.input_mode {
+                    buffer.push_str(text);
                 }
                 continue;
             }
@@ -2374,156 +2464,131 @@ async fn run_app(
                         }
                         _ => {}
                     },
-                    InputMode::EditTarget => match key.code {
+                    InputMode::EditSheet => match key.code {
                         KeyCode::Esc => {
-                            app.cancel_input();
+                            if app.edit_sheet.as_ref().is_some_and(|s| s.dirty) {
+                                app.input_mode = InputMode::EditSheetConfirmDiscard;
+                            } else {
+                                app.edit_sheet = None;
+                                app.input_mode = InputMode::Normal;
+                            }
                         }
-                        KeyCode::Enter => {
-                            app.next_edit_step();
+                        KeyCode::Tab | KeyCode::BackTab => {
+                            if let Some(s) = app.edit_sheet.as_mut() {
+                                s.toggle_tab();
+                            }
                         }
-                        KeyCode::Backspace => {
-                            app.input.pop();
-                        }
-                        KeyCode::Char(c) => {
-                            app.input.push(c);
-                        }
-                        _ => {}
-                    },
-                    InputMode::EditZone => match key.code {
-                        KeyCode::Esc => {
-                            app.cancel_input();
-                        }
-                        KeyCode::Enter => {
-                            // Extract all data before creating future
-                            let name = match app.editing_tunnel_name.clone() {
-                                Some(n) => n,
-                                None => {
-                                    app.status_message = Some("No tunnel name".to_string());
-                                    app.input_mode = InputMode::Normal;
-                                    continue;
-                                }
-                            };
-                            let new_target = match app.new_tunnel_target.clone() {
-                                Some(t) => t,
-                                None => {
-                                    app.status_message = Some("No target URL".to_string());
-                                    app.input_mode = InputMode::Normal;
-                                    continue;
-                                }
-                            };
-                            let new_zone: config::ZoneConfig =
-                                match app.zones.get(app.zone_selected) {
-                                    Some(z) => z.clone(),
-                                    None => {
-                                        app.status_message = Some("No zone selected".to_string());
-                                        app.input_mode = InputMode::Normal;
-                                        continue;
-                                    }
-                                };
-                            let original_zone_id = match app.original_zone_id.clone() {
-                                Some(z) => z,
-                                None => {
-                                    app.status_message = Some("Missing original zone".to_string());
-                                    app.input_mode = InputMode::Normal;
-                                    continue;
-                                }
-                            };
-                            let original_hostname = match app.original_hostname.clone() {
-                                Some(h) => h,
-                                None => {
-                                    app.status_message =
-                                        Some("Missing original hostname".to_string());
-                                    app.input_mode = InputMode::Normal;
-                                    continue;
-                                }
-                            };
-                            let account: Account = match app.current_account() {
-                                Some(a) => a.clone(),
-                                None => {
-                                    app.status_message = Some("No account selected".to_string());
-                                    app.input_mode = InputMode::Normal;
-                                    continue;
-                                }
-                            };
-
-                            // Find tunnel info
-                            let entry = match app.tunnels.iter().find(|e| e.tunnel.name == name) {
-                                Some(e) => e,
-                                None => {
-                                    app.status_message = Some("Tunnel not found".to_string());
-                                    app.input_mode = InputMode::Normal;
-                                    continue;
-                                }
-                            };
-                            let was_running = entry.status == TunnelStatus::Running;
-                            let tunnel_id = entry.tunnel.tunnel_id.clone();
-
-                            app.spinner.start(&format!("Updating {}...", name));
-
-                            let fut = edit_tunnel_op(
-                                name.clone(),
-                                new_target,
-                                new_zone,
-                                original_zone_id,
-                                original_hostname,
-                                tunnel_id,
-                                was_running,
-                                account,
-                            );
-                            tokio::pin!(fut);
-
-                            let result: Result<String> = loop {
-                                terminal.draw(|f| ui::render(f, app))?;
-
-                                if event::poll(Duration::from_millis(10))? {
-                                    if let Event::Key(k) = event::read()? {
-                                        if is_cancel_key(&k) {
-                                            break Err(anyhow::anyhow!("Cancelled"));
-                                        }
-                                    }
-                                }
-
-                                tokio::select! {
-                                    biased;
-                                    res = &mut fut => break res,
-                                    _ = tokio::time::sleep(Duration::from_millis(70)) => {
-                                        app.spinner.tick();
-                                    }
-                                }
-                            };
-
-                            app.spinner.stop();
-                            app.editing_tunnel_name = None;
-                            app.new_tunnel_target = None;
-                            app.original_zone_id = None;
-                            app.original_hostname = None;
-                            app.input_mode = InputMode::Normal;
-
-                            match result {
-                                Ok(name) => {
-                                    app.status_message = Some(format!("Tunnel '{}' updated", name));
-                                    app.load_tunnels().await?;
-                                    // Select the edited tunnel
-                                    if let Some(pos) =
-                                        app.tunnels.iter().position(|t| t.tunnel.name == name)
-                                    {
-                                        app.selected = pos;
-                                        app.refresh_logs();
-                                    }
-                                }
-                                Err(e) if e.to_string() == "Cancelled" => {
-                                    app.status_message = Some("Cancelled".to_string());
-                                }
-                                Err(e) => {
-                                    app.status_message = Some(format!("Error: {}", e));
+                        KeyCode::Up => {
+                            if let Some(s) = app.edit_sheet.as_mut() {
+                                if s.active_tab == crate::tui::edit_sheet::SheetTab::Advanced {
+                                    s.select_prev();
                                 }
                             }
                         }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            app.select_zone_prev();
+                        KeyCode::Down => {
+                            if let Some(s) = app.edit_sheet.as_mut() {
+                                if s.active_tab == crate::tui::edit_sheet::SheetTab::Advanced {
+                                    s.select_next();
+                                }
+                            }
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            app.select_zone_next();
+                        KeyCode::Char('d')
+                            if app.edit_sheet.as_ref().is_some_and(|s| {
+                                s.active_tab == crate::tui::edit_sheet::SheetTab::Advanced
+                            }) =>
+                        {
+                            if let Some(s) = app.edit_sheet.as_mut() {
+                                s.clear_selected();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(s) = app.edit_sheet.as_ref() {
+                                if s.active_tab == crate::tui::edit_sheet::SheetTab::Advanced {
+                                    let row = &s.advanced_rows[s.selected_row];
+                                    let yaml_key = row.spec.yaml_key.to_string();
+                                    use crate::cloudflared_options::OptionKind;
+                                    match &row.spec.kind {
+                                        OptionKind::Bool { default } => {
+                                            let current = match &row.value {
+                                                Some(crate::state::TunnelOptionValue::Bool(b)) => *b,
+                                                _ => *default,
+                                            };
+                                            if let Some(sm) = app.edit_sheet.as_mut() {
+                                                sm.advanced_rows[sm.selected_row].value =
+                                                    Some(crate::state::TunnelOptionValue::Bool(!current));
+                                                sm.dirty = true;
+                                            }
+                                        }
+                                        OptionKind::Enum { .. } => {
+                                            app.input_mode = InputMode::EditSheetPicker { yaml_key, cursor: 0 };
+                                        }
+                                        _ => {
+                                            let buffer = row.value.as_ref().map(|v| match v {
+                                                crate::state::TunnelOptionValue::String(s) => s.clone(),
+                                                crate::state::TunnelOptionValue::Int(n) => n.to_string(),
+                                                crate::state::TunnelOptionValue::List(items) => items.join("\n"),
+                                                crate::state::TunnelOptionValue::Bool(b) => b.to_string(),
+                                            }).unwrap_or_default();
+                                            app.input_mode = InputMode::EditSheetInput { yaml_key, buffer };
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            save_edit_sheet(app).await;
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditSheetInput { .. } => match key.code {
+                        KeyCode::Esc => app.input_mode = InputMode::EditSheet,
+                        KeyCode::Enter => {
+                            commit_input_edit(app);
+                            app.input_mode = InputMode::EditSheet;
+                        }
+                        KeyCode::Char(c) => {
+                            if let InputMode::EditSheetInput { buffer, .. } = &mut app.input_mode {
+                                buffer.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let InputMode::EditSheetInput { buffer, .. } = &mut app.input_mode {
+                                buffer.pop();
+                            }
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditSheetPicker { .. } => match key.code {
+                        KeyCode::Esc => app.input_mode = InputMode::EditSheet,
+                        KeyCode::Up => {
+                            if let InputMode::EditSheetPicker { cursor, .. } = &mut app.input_mode {
+                                *cursor = cursor.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let InputMode::EditSheetPicker { yaml_key, cursor } = &mut app.input_mode {
+                                if let Some(spec) = crate::cloudflared_options::find(yaml_key) {
+                                    if let crate::cloudflared_options::OptionKind::Enum { choices, .. } = &spec.kind {
+                                        if *cursor + 1 < choices.len() {
+                                            *cursor += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            commit_picker_edit(app);
+                            app.input_mode = InputMode::EditSheet;
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditSheetConfirmDiscard => match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            app.edit_sheet = None;
+                            app.input_mode = InputMode::Normal;
+                        }
+                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                            app.input_mode = InputMode::EditSheet;
                         }
                         _ => {}
                     },
