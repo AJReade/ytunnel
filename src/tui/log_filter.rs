@@ -187,16 +187,12 @@ impl NgrokDevFilter {
     // Emit any requests still waiting for a response (called after all lines
     // processed). Format: same as paired-line but with [pending] status.
     pub fn flush_pending(&mut self) -> Vec<String> {
-        let mut out = Vec::new();
-        // Sort by time so pending entries appear chronologically.
-        let mut all: Vec<PendingRequest> = self.pending.drain()
-            .flat_map(|(_, q)| q.into_iter())
-            .collect();
-        all.sort_by(|a, b| a.time.cmp(&b.time));
-        for req in all {
-            out.push(format_pair(&req.time, &req.method, &req.path, "[pending]", None));
-        }
-        out
+        // Drop unmatched requests silently. Long-polling / WebSocket / SSE
+        // requests never get a "response closed" line from cloudflared, and
+        // showing them as [pending] just floods the panel with noise. Users
+        // who want to see raw request lines can switch to Debug mode.
+        self.pending.clear();
+        Vec::new()
     }
 
     fn process_dbg(&mut self, time: &str, rest: &str) -> Option<String> {
@@ -250,23 +246,35 @@ fn is_status_code(s: &str) -> bool {
 
 // Format one paired request/response line.
 fn format_pair(time: &str, method: &str, path: &str, status: &str, bytes: Option<u64>) -> String {
-    let bytes_str = bytes.map(|n| format!("{}B", n)).unwrap_or_default();
-    format!("{}  {:<6} {:<50}  {:<5}  {}",
+    let bytes_str = bytes.map(|n| format_bytes(n)).unwrap_or_default();
+    // Tighter widths so 5-digit byte counts don't wrap in a 60%-of-terminal pane.
+    format!("{}  {:<6} {:<40}  {:<3}  {:>7}",
         time,
         method,
-        truncate(path, 50),
+        truncate(path, 40),
         status,
         bytes_str,
     )
 }
 
 fn format_error(time: &str, path: &str, error: &str) -> String {
-    format!("{}  {:<6} {:<50}  ERROR  {}",
+    format!("{}  {:<6} {:<40}  ERROR  {}",
         time,
         "???",
-        truncate(path, 50),
-        truncate(error, 40),
+        truncate(path, 40),
+        truncate(error, 30),
     )
+}
+
+// Compact human-readable byte count so 4-KB / 4-MB responses stay short.
+fn format_bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{}B", n)
+    } else if n < 1024 * 1024 {
+        format!("{:.1}K", n as f64 / 1024.0)
+    } else {
+        format!("{:.1}M", n as f64 / (1024.0 * 1024.0))
+    }
 }
 
 #[cfg(test)]
@@ -418,14 +426,12 @@ mod tests {
     }
 
     #[test]
-    fn flush_pending_emits_stashed_requests() {
+    fn flush_pending_drops_stashed_requests_silently() {
+        // Unmatched requests (e.g. long-polling / WebSocket that never gets a
+        // logged response) are silently dropped rather than displayed as
+        // [pending] — that would flood the panel with noise.
         let mut f = NgrokDevFilter::new();
         f.process_line(r#"2026-08-01T23:18:38Z DBG GET https://h/a HTTP/1.1 connIndex=3 event=1 path=/a"#);
-        let flushed = f.flush_pending();
-        assert_eq!(flushed.len(), 1);
-        assert!(flushed[0].contains("[pending]"), "expected [pending]: {}", flushed[0]);
-        assert!(flushed[0].contains("/a"));
-        // Second flush is empty.
         assert!(f.flush_pending().is_empty());
     }
 

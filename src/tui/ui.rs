@@ -378,8 +378,8 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
             .collect();
         filtered.extend(filter.flush_pending());
         if !filtered.is_empty() {
-            filtered.insert(0, format!("{}  {:<6} {:<50}  {:<5}  {}", "time    ", "method", "path", "code", "bytes"));
-            filtered.insert(1, format!("{}  {:<6} {:<50}  {:<5}  {}", "────────", "──────", "──────────────────────────────────────────────────", "─────", "─────"));
+            filtered.insert(0, format!("{}  {:<6} {:<40}  {:<3}  {:>7}", "time    ", "method", "path", "sts", "bytes"));
+            filtered.insert(1, format!("{}  {:<6} {:<40}  {:<3}  {:>7}", "────────", "──────", "────────────────────────────────────────", "───", "───────"));
         }
         if filtered.is_empty() && !raw_lines.is_empty() {
             vec!["(ngrok-dev: no HTTP requests yet — hit a URL on your tunnel to see them appear)".to_string()]
