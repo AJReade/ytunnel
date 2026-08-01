@@ -334,7 +334,12 @@ pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
     let _ = writeln!(out, "ingress:");
     let _ = writeln!(out, "  - hostname: {}", tunnel.hostname);
     let _ = writeln!(out, "    service: {}", target_url);
-    // originRequest attaches here in Task 3.
+    if !tunnel.origin_request.is_empty() {
+        let _ = writeln!(out, "    originRequest:");
+        for (key, value) in &tunnel.origin_request {
+            write_yaml_option(&mut out, key, value, 6);
+        }
+    }
     let _ = writeln!(out, "  - service: http_status:404");
 
     Ok(out)
@@ -483,5 +488,46 @@ mod tests {
             yaml.contains(r#"label: "weird\\value\"here""#),
             "escaping wrong:\n{yaml}"
         );
+    }
+
+    #[test]
+    fn origin_request_attaches_to_hostname_rule_only() {
+        let mut tunnel = sample_tunnel();
+        tunnel.origin_request.insert(
+            "httpHostHeader".into(),
+            TunnelOptionValue::String("google-spike.localhost".into()),
+        );
+        tunnel.origin_request.insert("noTLSVerify".into(), TunnelOptionValue::Bool(true));
+        tunnel.origin_request.insert(
+            "connectTimeout".into(),
+            TunnelOptionValue::String("30s".into()),
+        );
+
+        let yaml = generate_tunnel_config(&tunnel).unwrap();
+
+        // originRequest appears indented under the hostname rule (indent 4).
+        assert!(
+            yaml.contains("    originRequest:\n"),
+            "originRequest block missing or wrong indent:\n{yaml}"
+        );
+        // Its child keys are indented one level deeper (indent 6).
+        assert!(
+            yaml.contains("      httpHostHeader: \"google-spike.localhost\"\n"),
+            "httpHostHeader missing / wrong indent:\n{yaml}"
+        );
+        assert!(yaml.contains("      noTLSVerify: true\n"), "noTLSVerify wrong:\n{yaml}");
+        assert!(yaml.contains("      connectTimeout: \"30s\"\n"), "connectTimeout wrong:\n{yaml}");
+
+        // originRequest must appear EXACTLY ONCE — never on the catch-all rule.
+        assert_eq!(
+            yaml.matches("originRequest").count(),
+            1,
+            "originRequest should appear once, not on catch-all:\n{yaml}"
+        );
+
+        // originRequest block sits BEFORE the catch-all `- service: http_status:404` line.
+        let origin_pos = yaml.find("originRequest").unwrap();
+        let catch_all_pos = yaml.find("http_status:404").unwrap();
+        assert!(origin_pos < catch_all_pos);
     }
 }
