@@ -2018,6 +2018,8 @@ async fn run_app(
                     app.input.push_str(text);
                 } else if let InputMode::EditSheetInput { buffer, .. } = &mut app.input_mode {
                     buffer.push_str(text);
+                } else if let InputMode::EditSheetBasicInput { buffer, .. } = &mut app.input_mode {
+                    buffer.push_str(text);
                 }
                 continue;
             }

@@ -326,7 +326,60 @@ fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
             ),
         ]),
     ];
-    f.render_widget(Paragraph::new(lines), area);
+
+    // Summary of configured Advanced options below the four Basic fields.
+    let mut all_lines = lines;
+    all_lines.push(Line::from(""));
+    all_lines.push(Line::from(Span::styled(
+        "── Configured Advanced options ──",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+
+    let mut set_rows: Vec<&AdvancedRow> = sheet
+        .advanced_rows
+        .iter()
+        .filter(|r| r.value.is_some())
+        .collect();
+    // Group by scope for readability: Tunnel first, then OriginRequest.
+    set_rows.sort_by_key(|r| match r.spec.scope {
+        OptionScope::Tunnel => 0,
+        OptionScope::OriginRequest => 1,
+    });
+
+    if set_rows.is_empty() {
+        all_lines.push(Line::from(Span::styled(
+            "(none — Tab to Advanced to configure cloudflared options)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let mut last_scope: Option<OptionScope> = None;
+        for row in set_rows {
+            if Some(row.spec.scope) != last_scope {
+                let header = match row.spec.scope {
+                    OptionScope::Tunnel => "  Tunnel:",
+                    OptionScope::OriginRequest => "  Origin Request:",
+                };
+                all_lines.push(Line::from(Span::styled(
+                    header,
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                )));
+                last_scope = Some(row.spec.scope);
+            }
+            let value_display = row
+                .value
+                .as_ref()
+                .map(value_to_display)
+                .unwrap_or_default();
+            all_lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(row.spec.yaml_key, label_style),
+                Span::raw(" = "),
+                Span::styled(value_display, value_style),
+            ]));
+        }
+    }
+
+    f.render_widget(Paragraph::new(all_lines), area);
 }
 
 fn render_advanced(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
