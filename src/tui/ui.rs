@@ -781,8 +781,17 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
                 .title(format!(" Edit: {} ", yaml_key));
             let inner = block.inner(area);
             f.render_widget(block, area);
-            let p = Paragraph::new(buffer.as_str()).wrap(Wrap { trim: false });
-            f.render_widget(p, inner);
+            if buffer.is_empty() {
+                if let Some(hint) = placeholder_for(yaml_key) {
+                    let p = Paragraph::new(hint)
+                        .style(Style::default().fg(Color::DarkGray))
+                        .wrap(Wrap { trim: false });
+                    f.render_widget(p, inner);
+                }
+            } else {
+                let p = Paragraph::new(buffer.as_str()).wrap(Wrap { trim: false });
+                f.render_widget(p, inner);
+            }
         }
         InputMode::EditSheetPicker { yaml_key, cursor } => {
             let Some(spec) = crate::cloudflared_options::find(yaml_key) else { return };
@@ -821,6 +830,17 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
             );
         }
         _ => {}
+    }
+}
+
+// Look up the placeholder hint text for an option's editor field.
+// Returns None for kinds that don't carry a placeholder (Duration, Enum, Int, Bool).
+fn placeholder_for(yaml_key: &str) -> Option<&'static str> {
+    let spec = crate::cloudflared_options::find(yaml_key)?;
+    match &spec.kind {
+        crate::cloudflared_options::OptionKind::String { placeholder, .. } => Some(placeholder),
+        crate::cloudflared_options::OptionKind::List { placeholder } => Some(placeholder),
+        _ => None,
     }
 }
 

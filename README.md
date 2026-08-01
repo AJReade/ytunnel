@@ -204,6 +204,7 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `o` | Open tunnel URL in browser |
 | `h` | Check tunnel health |
 | `A` | Toggle auto-start on login (⟳ = enabled) |
+| `e` | Edit tunnel (opens Basic/Advanced sheet — see below) |
 | `d` | Delete selected tunnel |
 | `m` | Import ephemeral tunnel as managed |
 | `;` | Cycle through accounts (when multiple configured) |
@@ -212,6 +213,26 @@ Run `ytunnel` with no arguments to open the interactive dashboard:
 | `q` | Quit |
 
 Tunnels continue running in the background after you close the TUI.
+
+### Editing tunnels
+
+Press `e` on a selected tunnel to open the edit sheet:
+
+- **Basic tab** — target URL, zone (read-only for now), auto-start toggle, metrics port
+- **Advanced tab** — ~30 cloudflared options like `httpHostHeader`, `noTLSVerify`, `protocol`, `loglevel`, `retries`, `edge-ip-version`, origin-request tuning
+
+Sheet keybindings:
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Switch between Basic and Advanced |
+| `↑` / `↓` | Navigate rows |
+| `Enter` | Edit selected field (text input, picker, or in-place toggle for booleans) |
+| `d` | Clear an Advanced option back to cloudflared's default |
+| `Ctrl+S` | Save; regenerates the per-tunnel YAML and restarts the daemon so changes take effect immediately |
+| `Esc` | Cancel (prompts to confirm if there are unsaved edits) |
+
+Advanced options are persisted in `~/.config/ytunnel/tunnels.toml` and written into the generated cloudflared YAML at `~/.config/ytunnel/tunnel-configs/<name>.yml`. That file is user-inspectable if you want to see exactly what cloudflared is being told.
 
 ### Metrics Panel
 
