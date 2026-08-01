@@ -1,7 +1,7 @@
 // State + rendering for the two-tab tunnel edit sheet.
 //
-// Basic tab: existing per-tunnel fields (target, zone, auto_start, metrics_port).
-// Advanced tab: curated cloudflared options from crate::cloudflared_options::OPTIONS.
+// Basic tab: target, zone, log mode.
+// Advanced tab: ytunnel-only settings (auto_start, metrics_port) then curated cloudflared options.
 
 use std::collections::BTreeMap;
 
@@ -48,7 +48,7 @@ pub struct EditSheetState {
     pub log_mode: crate::state::LogMode,
     pub advanced_rows: Vec<AdvancedRow>,
     pub selected_row: usize,
-    // Index of the currently-selected Basic tab field (0-4, maps to BasicField).
+    // Index of the currently-selected Basic tab field (0-2: Target, Zone, LogMode).
     pub basic_selected: usize,
     // True when any field diverges from the original tunnel.
     pub dirty: bool,
@@ -139,7 +139,8 @@ impl EditSheetState {
     }
 
     pub fn select_next(&mut self) {
-        if self.selected_row + 1 < self.advanced_rows.len() {
+        // Virtual list: 2 ytunnel rows + advanced_rows.
+        if self.selected_row < 1 + self.advanced_rows.len() {
             self.selected_row += 1;
         }
     }
@@ -151,7 +152,12 @@ impl EditSheetState {
     }
 
     pub fn clear_selected(&mut self) {
-        if let Some(row) = self.advanced_rows.get_mut(self.selected_row) {
+        // Rows 0 and 1 are ytunnel settings — no-op (they always have a value).
+        if self.selected_row < 2 {
+            return;
+        }
+        let options_idx = self.selected_row - 2;
+        if let Some(row) = self.advanced_rows.get_mut(options_idx) {
             if row.value.is_some() {
                 row.value = None;
                 self.dirty = true;
@@ -159,9 +165,9 @@ impl EditSheetState {
         }
     }
 
-    // Move Basic tab selection down (bounded at last field, index 4).
+    // Move Basic tab selection down (bounded at last field, index 2).
     pub fn select_basic_next(&mut self) {
-        if self.basic_selected < 4 {
+        if self.basic_selected < 2 {
             self.basic_selected += 1;
         }
     }
@@ -236,13 +242,19 @@ pub fn render(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
     }
 
     // Context line: description of the currently-selected row.
-    let context = match sheet.active_tab {
+    let context: &str = match sheet.active_tab {
         SheetTab::Basic => basic_field_description(sheet.basic_selected),
-        SheetTab::Advanced => sheet
-            .advanced_rows
-            .get(sheet.selected_row)
-            .map(|row| row.spec.description)
-            .unwrap_or(""),
+        SheetTab::Advanced => {
+            if sheet.selected_row < 2 {
+                advanced_ytunnel_description(sheet.selected_row)
+            } else {
+                sheet
+                    .advanced_rows
+                    .get(sheet.selected_row - 2)
+                    .map(|row| row.spec.description)
+                    .unwrap_or("")
+            }
+        }
     };
     f.render_widget(
         Paragraph::new(context)
@@ -266,9 +278,16 @@ fn basic_field_description(idx: usize) -> &'static str {
     match idx {
         0 => "Local URL cloudflared should forward requests to (e.g. http://localhost:3000).",
         1 => "Cloudflare zone hosting the tunnel hostname. Enter to pick a zone — DNS records are reconciled automatically on save.",
-        2 => "Auto-start on login via launchd (macOS) / systemd (Linux). Enter toggles.",
-        3 => "Local port for cloudflared's Prometheus metrics endpoint. Blank = auto-assigned.",
-        4 => "Cloudflared log verbosity + ytunnel display filter. 'ngrok-dev' shows a compact per-request table (requires debug internally).",
+        2 => "Cloudflared log verbosity + ytunnel display filter. 'ngrok-dev' shows a compact per-request table (requires debug internally).",
+        _ => "",
+    }
+}
+
+// One-line description for the ytunnel-section rows in the Advanced tab.
+fn advanced_ytunnel_description(idx: usize) -> &'static str {
+    match idx {
+        0 => "Auto-start on login via launchd (macOS) / systemd (Linux). Enter toggles.",
+        1 => "Local port for cloudflared's Prometheus metrics endpoint. Blank = auto-assigned.",
         _ => "",
     }
 }
@@ -317,22 +336,6 @@ fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
         },
         Line::from(vec![
             marker_span(2),
-            Span::styled("Auto-start:   ", label_style),
-            Span::styled(
-                if sheet.auto_start { "yes" } else { "no" },
-                value_style,
-            ),
-        ]),
-        Line::from(vec![
-            marker_span(3),
-            Span::styled("Metrics port: ", label_style),
-            Span::styled(
-                sheet.metrics_port.map(|p| p.to_string()).unwrap_or_else(|| "(auto)".into()),
-                value_style,
-            ),
-        ]),
-        Line::from(vec![
-            marker_span(4),
             Span::styled("Log mode:     ", label_style),
             Span::styled(log_mode_label(sheet.log_mode), value_style),
         ]),
@@ -401,8 +404,47 @@ fn log_mode_label(m: crate::state::LogMode) -> &'static str {
     }
 }
 
+// What text to show in the Advanced-tab value column for the ytunnel rows.
+fn ytunnel_row_display(sheet: &EditSheetState, idx: usize) -> String {
+    match idx {
+        0 => if sheet.auto_start { "yes".into() } else { "no".into() },
+        1 => sheet.metrics_port.map(|p| p.to_string()).unwrap_or_else(|| "(auto)".into()),
+        _ => String::new(),
+    }
+}
+
 fn render_advanced(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
     let mut items: Vec<ListItem> = Vec::new();
+    let label_style = Style::default().add_modifier(Modifier::BOLD);
+
+    // ytunnel section header.
+    items.push(ListItem::new(Line::from(Span::styled(
+        "── ytunnel ──",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))));
+
+    // The two ytunnel rows (virtual indices 0 and 1).
+    let ytunnel_labels = ["Auto-start              ", "Metrics port            "];
+    for ytunnel_idx in 0..2usize {
+        let is_selected = sheet.selected_row == ytunnel_idx;
+        let selected_marker = if is_selected { "› " } else { "  " };
+        let display = ytunnel_row_display(sheet, ytunnel_idx);
+        let value_style = Style::default().fg(Color::Green);
+        let mut line = Line::from(vec![
+            Span::styled(
+                selected_marker,
+                Style::default().fg(if is_selected { Color::Yellow } else { Color::DarkGray }),
+            ),
+            Span::styled(ytunnel_labels[ytunnel_idx], label_style),
+            Span::styled(display, value_style),
+        ]);
+        if is_selected {
+            line = line.style(Style::default().bg(Color::Rgb(40, 40, 40)));
+        }
+        items.push(ListItem::new(line));
+    }
+
+    // cloudflared options sections.
     let mut last_scope: Option<OptionScope> = None;
 
     for (idx, row) in sheet.advanced_rows.iter().enumerate() {
@@ -430,7 +472,8 @@ fn render_advanced(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
             },
         };
 
-        let is_selected = idx == sheet.selected_row;
+        // Virtual index for this options row is idx + 2.
+        let is_selected = sheet.selected_row == idx + 2;
         let selected_marker = if is_selected { "› " } else { "  " };
         let value_style = match &row.value {
             Some(_) => Style::default().fg(Color::Green),
@@ -549,8 +592,9 @@ mod tests {
         let tunnel = tunnel_with_options();
         let mut sheet = EditSheetState::from_tunnel(&tunnel);
         // Use httpHostHeader (origin_request) as a set row to clear.
+        // selected_row is offset by 2 (the two ytunnel rows come first).
         let idx = sheet.advanced_rows.iter().position(|r| r.spec.yaml_key == "httpHostHeader").unwrap();
-        sheet.selected_row = idx;
+        sheet.selected_row = idx + 2;
 
         sheet.clear_selected();
         assert!(sheet.advanced_rows[idx].value.is_none());
@@ -564,47 +608,59 @@ mod tests {
         s.select_basic_next();
         assert_eq!(s.basic_selected, 1);
         s.select_basic_next();
+        assert_eq!(s.basic_selected, 2);
+        // Bounded at 2 (last field: LogMode).
         s.select_basic_next();
-        assert_eq!(s.basic_selected, 3);
-        // Can navigate to index 4 (LogMode).
-        s.select_basic_next();
-        assert_eq!(s.basic_selected, 4);
-        // Bounded at 4 (last field: LogMode).
-        s.select_basic_next();
-        assert_eq!(s.basic_selected, 4);
+        assert_eq!(s.basic_selected, 2);
         s.select_basic_prev();
-        assert_eq!(s.basic_selected, 3);
+        assert_eq!(s.basic_selected, 1);
         // Bounded at 0.
-        s.select_basic_prev();
-        s.select_basic_prev();
         s.select_basic_prev();
         s.select_basic_prev();
         assert_eq!(s.basic_selected, 0);
     }
 
     #[test]
-    fn basic_field_index_maps_to_enum() {
-        // Sanity: the field order in the enum matches the render order.
-        // If you reorder, the tests here and render_basic must both be updated.
+    fn basic_field_enum_order_stable() {
+        // Enum discriminants must not silently change; the input modal uses BasicField variants.
         assert_eq!(BasicField::Target as u8, 0);
         assert_eq!(BasicField::Zone as u8, 1);
         assert_eq!(BasicField::AutoStart as u8, 2);
         assert_eq!(BasicField::MetricsPort as u8, 3);
-    }
-
-    #[test]
-    fn basic_field_log_mode_is_index_4() {
         assert_eq!(BasicField::LogMode as u8, 4);
     }
 
     #[test]
-    fn select_basic_bounds_extended_to_4() {
+    fn select_basic_bounds_at_2() {
         let mut s = EditSheetState::from_tunnel(&tunnel_with_options());
-        s.basic_selected = 3;
+        s.basic_selected = 1;
         s.select_basic_next();
-        assert_eq!(s.basic_selected, 4);
-        s.select_basic_next(); // Should bound at 4.
-        assert_eq!(s.basic_selected, 4);
+        assert_eq!(s.basic_selected, 2);
+        s.select_basic_next(); // Should bound at 2.
+        assert_eq!(s.basic_selected, 2);
+    }
+
+    #[test]
+    fn select_advanced_navigates_ytunnel_and_options() {
+        let mut s = EditSheetState::from_tunnel(&tunnel_with_options());
+        // Starts at 0 (first ytunnel row: Auto-start).
+        assert_eq!(s.selected_row, 0);
+        s.select_next();
+        assert_eq!(s.selected_row, 1); // Metrics port ytunnel row.
+        s.select_next();
+        assert_eq!(s.selected_row, 2); // First OPTIONS row (index 0 in advanced_rows).
+        s.select_next();
+        assert_eq!(s.selected_row, 3); // Second OPTIONS row.
+        // clear_selected on ytunnel row (idx 0) is a no-op.
+        s.selected_row = 0;
+        let dirty_before = s.dirty;
+        s.clear_selected();
+        assert_eq!(s.dirty, dirty_before);
+        // clear_selected on an unset OPTIONS row (no value) does not set dirty.
+        let unset_idx = s.advanced_rows.iter().position(|r| r.value.is_none()).unwrap();
+        s.selected_row = unset_idx + 2;
+        s.clear_selected();
+        assert!(!s.dirty);
     }
 
     #[test]

@@ -2727,23 +2727,6 @@ async fn run_app(
                                                 }
                                             }
                                             2 => {
-                                                // Toggle auto_start in-place; no sub-modal.
-                                                if let Some(sm) = app.edit_sheet.as_mut() {
-                                                    sm.auto_start = !sm.auto_start;
-                                                    sm.dirty = true;
-                                                }
-                                            }
-                                            3 => {
-                                                let buffer = s
-                                                    .metrics_port
-                                                    .map(|p| p.to_string())
-                                                    .unwrap_or_default();
-                                                app.input_mode = InputMode::EditSheetBasicInput {
-                                                    field: BasicField::MetricsPort,
-                                                    buffer,
-                                                };
-                                            }
-                                            4 => {
                                                 let cursor = app.edit_sheet.as_ref()
                                                     .map(|s| log_mode_to_index(s.log_mode))
                                                     .unwrap_or(0);
@@ -2753,32 +2736,56 @@ async fn run_app(
                                         }
                                     }
                                     crate::tui::edit_sheet::SheetTab::Advanced => {
-                                        let row = &s.advanced_rows[s.selected_row];
-                                        let yaml_key = row.spec.yaml_key.to_string();
-                                        use crate::cloudflared_options::OptionKind;
-                                        match &row.spec.kind {
-                                            OptionKind::Bool { default } => {
-                                                let current = match &row.value {
-                                                    Some(crate::state::TunnelOptionValue::Bool(b)) => *b,
-                                                    _ => *default,
-                                                };
+                                        match s.selected_row {
+                                            0 => {
+                                                // Toggle auto_start in-place; no sub-modal.
                                                 if let Some(sm) = app.edit_sheet.as_mut() {
-                                                    sm.advanced_rows[sm.selected_row].value =
-                                                        Some(crate::state::TunnelOptionValue::Bool(!current));
+                                                    sm.auto_start = !sm.auto_start;
                                                     sm.dirty = true;
                                                 }
                                             }
-                                            OptionKind::Enum { .. } => {
-                                                app.input_mode = InputMode::EditSheetPicker { yaml_key, cursor: 0 };
+                                            1 => {
+                                                // Open MetricsPort input modal.
+                                                use crate::tui::edit_sheet::BasicField;
+                                                let buffer = s
+                                                    .metrics_port
+                                                    .map(|p| p.to_string())
+                                                    .unwrap_or_default();
+                                                app.input_mode = InputMode::EditSheetBasicInput {
+                                                    field: BasicField::MetricsPort,
+                                                    buffer,
+                                                };
                                             }
-                                            _ => {
-                                                let buffer = row.value.as_ref().map(|v| match v {
-                                                    crate::state::TunnelOptionValue::String(s) => s.clone(),
-                                                    crate::state::TunnelOptionValue::Int(n) => n.to_string(),
-                                                    crate::state::TunnelOptionValue::List(items) => items.join("\n"),
-                                                    crate::state::TunnelOptionValue::Bool(b) => b.to_string(),
-                                                }).unwrap_or_default();
-                                                app.input_mode = InputMode::EditSheetInput { yaml_key, buffer };
+                                            options_virtual_idx => {
+                                                let options_idx = options_virtual_idx - 2;
+                                                let row = &s.advanced_rows[options_idx];
+                                                let yaml_key = row.spec.yaml_key.to_string();
+                                                use crate::cloudflared_options::OptionKind;
+                                                match &row.spec.kind {
+                                                    OptionKind::Bool { default } => {
+                                                        let current = match &row.value {
+                                                            Some(crate::state::TunnelOptionValue::Bool(b)) => *b,
+                                                            _ => *default,
+                                                        };
+                                                        if let Some(sm) = app.edit_sheet.as_mut() {
+                                                            sm.advanced_rows[options_idx].value =
+                                                                Some(crate::state::TunnelOptionValue::Bool(!current));
+                                                            sm.dirty = true;
+                                                        }
+                                                    }
+                                                    OptionKind::Enum { .. } => {
+                                                        app.input_mode = InputMode::EditSheetPicker { yaml_key, cursor: 0 };
+                                                    }
+                                                    _ => {
+                                                        let buffer = row.value.as_ref().map(|v| match v {
+                                                            crate::state::TunnelOptionValue::String(s) => s.clone(),
+                                                            crate::state::TunnelOptionValue::Int(n) => n.to_string(),
+                                                            crate::state::TunnelOptionValue::List(items) => items.join("\n"),
+                                                            crate::state::TunnelOptionValue::Bool(b) => b.to_string(),
+                                                        }).unwrap_or_default();
+                                                        app.input_mode = InputMode::EditSheetInput { yaml_key, buffer };
+                                                    }
+                                                }
                                             }
                                         }
                                     }
