@@ -431,18 +431,18 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(logs, area);
 }
 
-// Color raw cloudflared lines by level marker (INF/WRN/ERR/DBG).
+// Color raw cloudflared lines by level marker. Matches the original palette
+// (ERR red, WRN yellow, INF green) plus a bright fallback for DBG and other
+// lines so they stay readable.
 fn raw_line_style(line: &str) -> Style {
-    if line.contains(" ERR ") {
+    if line.contains("ERR") {
         Style::default().fg(Color::Red)
-    } else if line.contains(" WRN ") {
+    } else if line.contains("WRN") {
         Style::default().fg(Color::Yellow)
-    } else if line.contains(" INF ") {
+    } else if line.contains("INF") {
         Style::default().fg(Color::Green)
-    } else if line.contains(" DBG ") {
-        Style::default().fg(Color::DarkGray)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Color::White)
     }
 }
 
