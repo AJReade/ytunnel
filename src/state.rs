@@ -310,39 +310,57 @@ fn write_yaml_option(
     }
 }
 
-// Generate the cloudflared config YAML content for a tunnel.
-pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
-    let credentials_path = tunnel.credentials_path()?;
+// Build the cloudflared YAML from raw parts. Shared between persistent tunnels
+// (via generate_tunnel_config) and ephemeral tunnels (via tunnel::run_tunnel).
+pub fn build_tunnel_yaml(
+    tunnel_id: &str,
+    credentials_path: &std::path::Path,
+    hostname: &str,
+    target: &str,
+    tunnel_options: &BTreeMap<String, TunnelOptionValue>,
+    origin_request: &BTreeMap<String, TunnelOptionValue>,
+) -> Result<String> {
+    use std::fmt::Write;
 
-    let target_url =
-        if tunnel.target.starts_with("http://") || tunnel.target.starts_with("https://") {
-            tunnel.target.clone()
-        } else {
-            format!("http://{}", tunnel.target)
-        };
+    let target_url = if target.starts_with("http://") || target.starts_with("https://") {
+        target.to_string()
+    } else {
+        format!("http://{}", target)
+    };
 
     let mut out = String::new();
-    use std::fmt::Write;
-    let _ = writeln!(out, "tunnel: {}", tunnel.tunnel_id);
+    let _ = writeln!(out, "tunnel: {}", tunnel_id);
     let _ = writeln!(out, "credentials-file: {}", credentials_path.display());
 
-    // Top-level tunnel options, alphabetized (BTreeMap iteration order).
-    for (key, value) in &tunnel.tunnel_options {
+    for (key, value) in tunnel_options {
         write_yaml_option(&mut out, key, value, 0);
     }
 
     let _ = writeln!(out, "ingress:");
-    let _ = writeln!(out, "  - hostname: {}", tunnel.hostname);
+    let _ = writeln!(out, "  - hostname: {}", hostname);
     let _ = writeln!(out, "    service: {}", target_url);
-    if !tunnel.origin_request.is_empty() {
+    if !origin_request.is_empty() {
         let _ = writeln!(out, "    originRequest:");
-        for (key, value) in &tunnel.origin_request {
+        for (key, value) in origin_request {
             write_yaml_option(&mut out, key, value, 6);
         }
     }
     let _ = writeln!(out, "  - service: http_status:404");
 
     Ok(out)
+}
+
+// Generate the cloudflared config YAML content for a tunnel.
+pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
+    let credentials_path = tunnel.credentials_path()?;
+    build_tunnel_yaml(
+        &tunnel.tunnel_id,
+        &credentials_path,
+        &tunnel.hostname,
+        &tunnel.target,
+        &tunnel.tunnel_options,
+        &tunnel.origin_request,
+    )
 }
 
 // Write the cloudflared config file for a tunnel
@@ -529,5 +547,25 @@ mod tests {
         let origin_pos = yaml.find("originRequest").unwrap();
         let catch_all_pos = yaml.find("http_status:404").unwrap();
         assert!(origin_pos < catch_all_pos);
+    }
+
+    #[test]
+    fn build_yaml_from_parts_matches_persistent_shape() {
+        use std::path::PathBuf;
+
+        let yaml = build_tunnel_yaml(
+            "uuid-1",
+            &PathBuf::from("/tmp/creds.json"),
+            "demo.example.com",
+            "http://localhost:3000",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(yaml.starts_with("tunnel: uuid-1\n"));
+        assert!(yaml.contains("\ncredentials-file: /tmp/creds.json\n"));
+        assert!(yaml.contains("\n  - hostname: demo.example.com\n    service: http://localhost:3000\n"));
+        assert!(yaml.contains("\n  - service: http_status:404\n"));
     }
 }
