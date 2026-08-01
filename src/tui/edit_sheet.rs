@@ -14,6 +14,17 @@ pub enum SheetTab {
     Advanced,
 }
 
+// Index of an editable field on the Basic tab.
+// #[repr(u8)] allows `as u8` casts in tests to verify render order.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasicField {
+    Target = 0,
+    Zone = 1,
+    AutoStart = 2,
+    MetricsPort = 3,
+}
+
 // A single editable row in the Advanced tab.
 // One row per entry in OPTIONS, in registry order.
 #[derive(Debug, Clone)]
@@ -34,6 +45,8 @@ pub struct EditSheetState {
     pub metrics_port: Option<u16>,
     pub advanced_rows: Vec<AdvancedRow>,
     pub selected_row: usize,
+    // Index of the currently-selected Basic tab field (0-3, maps to BasicField).
+    pub basic_selected: usize,
     // True when any field diverges from the original tunnel.
     pub dirty: bool,
 }
@@ -63,6 +76,7 @@ impl EditSheetState {
             metrics_port: tunnel.metrics_port,
             advanced_rows,
             selected_row: 0,
+            basic_selected: 0,
             dirty: false,
         }
     }
@@ -125,6 +139,20 @@ impl EditSheetState {
             }
         }
     }
+
+    // Move Basic tab selection down (bounded at last field, index 3).
+    pub fn select_basic_next(&mut self) {
+        if self.basic_selected < 3 {
+            self.basic_selected += 1;
+        }
+    }
+
+    // Move Basic tab selection up (bounded at 0).
+    pub fn select_basic_prev(&mut self) {
+        if self.basic_selected > 0 {
+            self.basic_selected -= 1;
+        }
+    }
 }
 
 use ratatui::{
@@ -169,7 +197,7 @@ pub fn render(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
     }
 
     let help = match sheet.active_tab {
-        SheetTab::Basic => "Tab: switch pane   Ctrl+S: save   Esc: cancel",
+        SheetTab::Basic => "↑/↓: select   Enter: edit   Tab: switch pane   Ctrl+S: save   Esc: cancel",
         SheetTab::Advanced => "↑/↓: select   Enter: edit   d: clear   Tab: switch pane   Ctrl+S: save   Esc: cancel",
     };
     f.render_widget(
@@ -179,20 +207,27 @@ pub fn render(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
 }
 
 fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
+    let sel = sheet.basic_selected;
+    let marker = |idx: usize| if idx == sel { "› " } else { "  " };
+
     let lines = vec![
         Line::from(vec![
-            Span::styled("Target: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(marker(0)),
+            Span::styled("Target:       ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(&sheet.target),
         ]),
         Line::from(vec![
-            Span::styled("Zone:   ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(marker(1)),
+            Span::styled("Zone:         ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(&sheet.zone_name),
         ]),
         Line::from(vec![
-            Span::styled("Auto-start: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(marker(2)),
+            Span::styled("Auto-start:   ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(if sheet.auto_start { "yes" } else { "no" }),
         ]),
         Line::from(vec![
+            Span::raw(marker(3)),
             Span::styled("Metrics port: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(
                 sheet.metrics_port.map(|p| p.to_string()).unwrap_or_else(|| "(auto)".into()),
@@ -349,6 +384,37 @@ mod tests {
         sheet.clear_selected();
         assert!(sheet.advanced_rows[idx].value.is_none());
         assert!(sheet.dirty);
+    }
+
+    #[test]
+    fn select_basic_navigates_between_fields() {
+        let mut s = EditSheetState::from_tunnel(&tunnel_with_options());
+        assert_eq!(s.basic_selected, 0);
+        s.select_basic_next();
+        assert_eq!(s.basic_selected, 1);
+        s.select_basic_next();
+        s.select_basic_next();
+        assert_eq!(s.basic_selected, 3);
+        // Bounded at 3 (last field: MetricsPort).
+        s.select_basic_next();
+        assert_eq!(s.basic_selected, 3);
+        s.select_basic_prev();
+        assert_eq!(s.basic_selected, 2);
+        // Bounded at 0.
+        s.select_basic_prev();
+        s.select_basic_prev();
+        s.select_basic_prev();
+        assert_eq!(s.basic_selected, 0);
+    }
+
+    #[test]
+    fn basic_field_index_maps_to_enum() {
+        // Sanity: the field order in the enum matches the render order.
+        // If you reorder, the tests here and render_basic must both be updated.
+        assert_eq!(BasicField::Target as u8, 0);
+        assert_eq!(BasicField::Zone as u8, 1);
+        assert_eq!(BasicField::AutoStart as u8, 2);
+        assert_eq!(BasicField::MetricsPort as u8, 3);
     }
 
     #[test]

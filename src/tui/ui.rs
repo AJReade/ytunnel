@@ -100,6 +100,7 @@ pub fn render(f: &mut Frame, app: &App) {
         InputMode::AddZone => render_zone_dialog(f, app),
         InputMode::EditSheet
         | InputMode::EditSheetInput { .. }
+        | InputMode::EditSheetBasicInput { .. }
         | InputMode::EditSheetPicker { .. }
         | InputMode::EditSheetConfirmDiscard => {
             if let Some(sheet) = app.edit_sheet.as_ref() {
@@ -594,8 +595,25 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
             " Enter value, then press Enter. Esc to cancel.".to_string()
         }
         InputMode::AddZone => " ↑/↓ select zone  Enter confirm  Esc cancel".to_string(),
-        InputMode::EditSheet => " Tab: switch pane   Ctrl+S: save   Esc: cancel".to_string(),
+        InputMode::EditSheet => {
+            // Show tab-specific help.
+            let is_basic = app
+                .edit_sheet
+                .as_ref()
+                .map(|s| s.active_tab == crate::tui::edit_sheet::SheetTab::Basic)
+                .unwrap_or(true);
+            if is_basic {
+                " ↑/↓: select   Enter: edit   Tab: switch pane   Ctrl+S: save   Esc: cancel"
+                    .to_string()
+            } else {
+                " ↑/↓: select   Enter: edit   d: clear   Tab: switch pane   Ctrl+S: save   Esc: cancel"
+                    .to_string()
+            }
+        }
         InputMode::EditSheetInput { .. } => {
+            " Type value   Enter: confirm   Esc: cancel".to_string()
+        }
+        InputMode::EditSheetBasicInput { .. } => {
             " Type value   Enter: confirm   Esc: cancel".to_string()
         }
         InputMode::EditSheetPicker { .. } => {
@@ -732,8 +750,29 @@ fn render_zone_dialog(f: &mut Frame, app: &App) {
     f.render_widget(content, area);
 }
 
+fn basic_field_human_name(field: crate::tui::edit_sheet::BasicField) -> &'static str {
+    use crate::tui::edit_sheet::BasicField;
+    match field {
+        BasicField::Target => "Target URL",
+        BasicField::Zone => "Zone",
+        BasicField::AutoStart => "Auto-start",
+        BasicField::MetricsPort => "Metrics port",
+    }
+}
+
 fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
     match &app.input_mode {
+        InputMode::EditSheetBasicInput { field, buffer } => {
+            let area = centered_rect(50, 20, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Edit: {} ", basic_field_human_name(*field)));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let p = Paragraph::new(buffer.as_str()).wrap(Wrap { trim: false });
+            f.render_widget(p, inner);
+        }
         InputMode::EditSheetInput { yaml_key, buffer } => {
             let area = centered_rect(50, 20, f.area());
             f.render_widget(Clear, area);
