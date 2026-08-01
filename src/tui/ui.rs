@@ -398,17 +398,27 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     let start = end.saturating_sub(visible_height);
     let visible = &all_lines[start..end];
 
-    let log_lines: Vec<Line> = visible.iter().map(|l| Line::from(l.as_str())).collect();
+    let log_lines: Vec<Line> = visible
+        .iter()
+        .map(|l| {
+            let style = match log_mode {
+                crate::state::LogMode::NgrokDev => ngrok_dev_line_style(l),
+                _ => raw_line_style(l),
+            };
+            Line::from(Span::styled(l.clone(), style))
+        })
+        .collect();
 
     let mode_tag = match log_mode {
         crate::state::LogMode::Default => "",
         crate::state::LogMode::Debug => " [debug]",
         crate::state::LogMode::NgrokDev => " [ngrok-dev]",
     };
+    let name_tag = name.as_deref().map(|n| format!(": {}", n)).unwrap_or_default();
     let title = if app.log_follow {
-        format!(" Logs{} ({}) ", mode_tag, total)
+        format!(" Logs{}{} ({}) ", name_tag, mode_tag, total)
     } else {
-        format!(" Logs{} ({} — scrolled, End to follow) ", mode_tag, total)
+        format!(" Logs{}{} ({} — scrolled, End to follow) ", name_tag, mode_tag, total)
     };
     let logs_border_style = if app.focus == Focus::Logs {
         Style::default().fg(Color::Yellow)
@@ -416,8 +426,54 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     let logs = Paragraph::new(log_lines)
-        .block(Block::default().borders(Borders::ALL).border_style(logs_border_style).title(title));
+        .block(Block::default().borders(Borders::ALL).border_style(logs_border_style).title(title))
+        .wrap(Wrap { trim: false });
     f.render_widget(logs, area);
+}
+
+// Color raw cloudflared lines by level marker (INF/WRN/ERR/DBG).
+fn raw_line_style(line: &str) -> Style {
+    if line.contains(" ERR ") {
+        Style::default().fg(Color::Red)
+    } else if line.contains(" WRN ") {
+        Style::default().fg(Color::Yellow)
+    } else if line.contains(" INF ") {
+        Style::default().fg(Color::Green)
+    } else if line.contains(" DBG ") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+// Color ngrok-dev formatted rows by HTTP status class (2xx green, 3xx cyan,
+// 4xx yellow, 5xx magenta, ERROR/[pending] red/gray). Header row is dim.
+fn ngrok_dev_line_style(line: &str) -> Style {
+    // Header + separator rows.
+    if line.starts_with("time    ") || line.starts_with("────────") {
+        return Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD);
+    }
+    if line.contains("  ERROR  ") {
+        return Style::default().fg(Color::Red);
+    }
+    if line.contains("[pending]") {
+        return Style::default().fg(Color::DarkGray);
+    }
+    // Scan for the status code after the path column. Format: "HH:MM:SS  METHOD path... STATUS BYTES"
+    // Extract the STATUS token — first 3-digit ASCII number after column 60ish.
+    for token in line.split_whitespace() {
+        if token.len() == 3 && token.chars().all(|c| c.is_ascii_digit()) {
+            let first = token.chars().next().unwrap();
+            return match first {
+                '2' => Style::default().fg(Color::Green),
+                '3' => Style::default().fg(Color::Cyan),
+                '4' => Style::default().fg(Color::Yellow),
+                '5' => Style::default().fg(Color::Magenta),
+                _ => Style::default().fg(Color::Gray),
+            };
+        }
+    }
+    Style::default().fg(Color::Gray)
 }
 
 fn render_details(f: &mut Frame, app: &App, area: Rect) {
