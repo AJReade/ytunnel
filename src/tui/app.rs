@@ -151,6 +151,8 @@ async fn create_tunnel_op(
         enabled: true,
         auto_start: false,
         metrics_port: None,
+        tunnel_options: std::collections::BTreeMap::new(),
+        origin_request: std::collections::BTreeMap::new(),
     };
 
     // Write tunnel config
@@ -198,6 +200,8 @@ async fn import_tunnel_op(
         enabled: true,
         auto_start: false,
         metrics_port: None,
+        tunnel_options: std::collections::BTreeMap::new(),
+        origin_request: std::collections::BTreeMap::new(),
     };
 
     // Write tunnel config
@@ -763,6 +767,8 @@ impl App {
                 enabled: status == TunnelStatus::Running,
                 auto_start,
                 metrics_port: None,
+                tunnel_options: std::collections::BTreeMap::new(),
+                origin_request: std::collections::BTreeMap::new(),
             };
 
             // Build pre-seeded metrics for running managed tunnels
@@ -1110,6 +1116,8 @@ impl App {
                         enabled: false,
                         auto_start: false,
                         metrics_port: None,
+                        tunnel_options: std::collections::BTreeMap::new(),
+                        origin_request: std::collections::BTreeMap::new(),
                     };
 
                     // Check if config file exists (means tunnel is actively running)
@@ -1701,6 +1709,8 @@ impl App {
             enabled: true,
             auto_start: false,
             metrics_port: None,
+            tunnel_options: std::collections::BTreeMap::new(),
+            origin_request: std::collections::BTreeMap::new(),
         };
 
         // Write tunnel config for daemon

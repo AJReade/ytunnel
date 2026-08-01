@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -23,6 +24,17 @@ impl TunnelStatus {
     }
 }
 
+// A YAML-serializable value for a cloudflared option.
+// Untagged enum: TOML/YAML value shape determines the variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TunnelOptionValue {
+    Bool(bool),
+    Int(i64),
+    String(String),
+    List(Vec<String>),
+}
+
 // A persistent tunnel configuration stored in tunnels.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentTunnel {
@@ -42,6 +54,14 @@ pub struct PersistentTunnel {
     // Port for cloudflared metrics endpoint (optional, calculated if not set)
     #[serde(default)]
     pub metrics_port: Option<u16>,
+    // Top-level cloudflared YAML options (loglevel, protocol, retries, ...).
+    // Serialized as top-level keys in the generated per-tunnel YAML.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tunnel_options: BTreeMap<String, TunnelOptionValue>,
+    // Per-ingress-rule originRequest options (httpHostHeader, noTLSVerify, ...).
+    // Attached to the ingress rule as `originRequest:` in the generated YAML.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub origin_request: BTreeMap<String, TunnelOptionValue>,
 }
 
 impl PersistentTunnel {
@@ -271,4 +291,51 @@ pub fn write_tunnel_config(tunnel: &PersistentTunnel) -> Result<PathBuf> {
     fs::write(&config_path, &config_content)
         .with_context(|| format!("Failed to write tunnel config to {}", config_path.display()))?;
     Ok(config_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_tunnel_deserializes_without_new_fields() {
+        // Represents a tunnels.toml entry written by an older ytunnel version.
+        let legacy_toml = r#"
+            name = "demo"
+            account_name = "acct"
+            target = "http://localhost:3000"
+            zone_id = "zone123"
+            zone_name = "example.com"
+            hostname = "demo.example.com"
+            tunnel_id = "uuid-1"
+            enabled = true
+        "#;
+
+        let tunnel: PersistentTunnel = toml::from_str(legacy_toml).expect("should parse");
+        assert_eq!(tunnel.name, "demo");
+        assert!(tunnel.tunnel_options.is_empty());
+        assert!(tunnel.origin_request.is_empty());
+    }
+
+    #[test]
+    fn tunnel_option_value_roundtrips_all_variants() {
+        use std::collections::BTreeMap;
+
+        let mut opts: BTreeMap<String, TunnelOptionValue> = BTreeMap::new();
+        opts.insert("loglevel".into(), TunnelOptionValue::String("debug".into()));
+        opts.insert("retries".into(), TunnelOptionValue::Int(5));
+        opts.insert("no-autoupdate".into(), TunnelOptionValue::Bool(true));
+        opts.insert(
+            "features".into(),
+            TunnelOptionValue::List(vec!["a".into(), "b".into()]),
+        );
+
+        let serialized = toml::to_string(&opts).unwrap();
+        let deserialized: BTreeMap<String, TunnelOptionValue> = toml::from_str(&serialized).unwrap();
+        assert_eq!(opts.len(), deserialized.len());
+        assert!(matches!(deserialized.get("loglevel"), Some(TunnelOptionValue::String(s)) if s == "debug"));
+        assert!(matches!(deserialized.get("retries"), Some(TunnelOptionValue::Int(5))));
+        assert!(matches!(deserialized.get("no-autoupdate"), Some(TunnelOptionValue::Bool(true))));
+        assert!(matches!(deserialized.get("features"), Some(TunnelOptionValue::List(v)) if v.len() == 2));
+    }
 }
