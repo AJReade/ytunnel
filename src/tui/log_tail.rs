@@ -108,6 +108,14 @@ impl LogTail {
         self.buffer.push_back(line);
     }
 
+    // Replace the buffer with a fixed set of lines (used by demo mode).
+    pub fn inject_lines(&mut self, lines: Vec<String>) {
+        self.buffer.clear();
+        for line in lines {
+            self.push_line(line);
+        }
+    }
+
     pub fn lines(&self) -> impl Iterator<Item = &str> {
         self.buffer.iter().map(String::as_str)
     }

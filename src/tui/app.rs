@@ -720,8 +720,12 @@ pub struct App {
     pub tunnels: Vec<TunnelEntry>,
     // Currently selected tunnel index
     pub selected: usize,
-    // Log lines for the selected tunnel
-    pub logs: Vec<String>,
+    // Per-tunnel byte-offset log tails (keyed by tunnel name)
+    pub log_tails: HashMap<String, crate::tui::log_tail::LogTail>,
+    // Scroll offset from bottom of log buffer. 0 = follow bottom.
+    pub log_scroll: u16,
+    // True while log_scroll == 0 (auto-scroll to bottom on new lines).
+    pub log_follow: bool,
     // Input buffer for add dialog
     pub input: String,
     // Temporary storage for new tunnel name during add flow
@@ -790,7 +794,9 @@ impl App {
             input_mode: InputMode::Normal,
             tunnels: Vec::new(),
             selected: 0,
-            logs: vec!["Select a tunnel to view logs".to_string()],
+            log_tails: HashMap::new(),
+            log_scroll: 0,
+            log_follow: true,
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -837,7 +843,9 @@ impl App {
             input_mode: InputMode::Normal,
             tunnels: Vec::new(),
             selected: 0,
-            logs: vec!["Select a tunnel to view logs".to_string()],
+            log_tails: HashMap::new(),
+            log_scroll: 0,
+            log_follow: true,
             input: String::new(),
             new_tunnel_name: None,
             new_tunnel_target: None,
@@ -1043,68 +1051,74 @@ impl App {
         self.refresh_demo_logs();
     }
 
-    // Generate cloudflared-style log lines for demo tunnels
+    // Generate cloudflared-style log lines for demo tunnels (writes into log_tails)
     fn refresh_demo_logs(&mut self) {
-        if let Some(entry) = self.tunnels.get(self.selected) {
+        let lines: Vec<String> = if let Some(entry) = self.tunnels.get(self.selected) {
             match entry.kind {
-                TunnelKind::Ephemeral => {
-                    self.logs = vec![
-                        "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
-                        String::new(),
-                        format!("Hostname: {}", entry.tunnel.hostname),
-                        format!("Target:   {}", entry.tunnel.target),
-                        format!("Zone:     {}", entry.tunnel.zone_name),
-                        String::new(),
-                        "[demo mode] Press [m] to import as managed tunnel".to_string(),
-                        "[demo mode] Press [d] to delete from Cloudflare".to_string(),
-                    ];
-                }
+                TunnelKind::Ephemeral => vec![
+                    "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
+                    String::new(),
+                    format!("Hostname: {}", entry.tunnel.hostname),
+                    format!("Target:   {}", entry.tunnel.target),
+                    format!("Zone:     {}", entry.tunnel.zone_name),
+                    String::new(),
+                    "[demo mode] Press [m] to import as managed tunnel".to_string(),
+                    "[demo mode] Press [d] to delete from Cloudflare".to_string(),
+                ],
                 TunnelKind::Managed => match entry.status {
                     TunnelStatus::Running => {
-                        let name = &entry.tunnel.name;
-                        let hostname = &entry.tunnel.hostname;
-                        let target = &entry.tunnel.target;
-                        self.logs = vec![
+                        let name = entry.tunnel.name.clone();
+                        let hostname = entry.tunnel.hostname.clone();
+                        let target = entry.tunnel.target.clone();
+                        vec![
                             format!("INF Starting tunnel tunnelID=demo-{}", name),
-                            format!("INF Version 2024.12.2"),
+                            "INF Version 2024.12.2".to_string(),
                             format!("INF ICMP proxy will use {}:0 as source for both IPv4 and IPv6", target.split(':').next().unwrap_or("localhost")),
-                            format!("INF Starting metrics server on 127.0.0.1:20241"),
-                            format!("INF Registered tunnel connection connIndex=0 connection=demo-conn-0 event=0 ip=198.41.192.77 location=dfw08 protocol=quic"),
-                            format!("INF Registered tunnel connection connIndex=1 connection=demo-conn-1 event=0 ip=198.41.200.33 location=den01 protocol=quic"),
-                            format!("INF Registered tunnel connection connIndex=2 connection=demo-conn-2 event=0 ip=198.41.200.13 location=iad02 protocol=quic"),
-                            format!("INF Registered tunnel connection connIndex=3 connection=demo-conn-3 event=0 ip=198.41.192.47 location=lax01 protocol=quic"),
+                            "INF Starting metrics server on 127.0.0.1:20241".to_string(),
+                            "INF Registered tunnel connection connIndex=0 connection=demo-conn-0 event=0 ip=198.41.192.77 location=dfw08 protocol=quic".to_string(),
+                            "INF Registered tunnel connection connIndex=1 connection=demo-conn-1 event=0 ip=198.41.200.33 location=den01 protocol=quic".to_string(),
+                            "INF Registered tunnel connection connIndex=2 connection=demo-conn-2 event=0 ip=198.41.200.13 location=iad02 protocol=quic".to_string(),
+                            "INF Registered tunnel connection connIndex=3 connection=demo-conn-3 event=0 ip=198.41.192.47 location=lax01 protocol=quic".to_string(),
                             format!("INF Updated tunnel route dns={} tunnelID=demo-{}", hostname, name),
-                            format!("INF Connection established connIndex=0 connection=demo-conn-0 location=dfw08"),
+                            "INF Connection established connIndex=0 connection=demo-conn-0 location=dfw08".to_string(),
                             String::new(),
                             format!("INF GET {} 200 12ms", hostname),
                             format!("INF GET {} 200 8ms", hostname),
                             format!("INF POST {}/api/data 201 45ms", hostname),
                             format!("INF GET {} 200 6ms", hostname),
-                        ];
+                        ]
                     }
                     TunnelStatus::Stopped => {
-                        let name = &entry.tunnel.name;
-                        self.logs = vec![
+                        let name = entry.tunnel.name.clone();
+                        vec![
                             format!("INF Starting tunnel tunnelID=demo-{}", name),
-                            format!("INF Registered tunnel connection connIndex=0 location=dfw08"),
-                            format!("INF Registered tunnel connection connIndex=1 location=den01"),
+                            "INF Registered tunnel connection connIndex=0 location=dfw08".to_string(),
+                            "INF Registered tunnel connection connIndex=1 location=den01".to_string(),
                             String::new(),
-                            format!("INF Initiating graceful shutdown due to signal"),
-                            format!("INF Quitting..."),
-                            format!("INF Unregistered tunnel connection connIndex=1"),
-                            format!("INF Unregistered tunnel connection connIndex=0"),
-                        ];
+                            "INF Initiating graceful shutdown due to signal".to_string(),
+                            "INF Quitting...".to_string(),
+                            "INF Unregistered tunnel connection connIndex=1".to_string(),
+                            "INF Unregistered tunnel connection connIndex=0".to_string(),
+                        ]
                     }
-                    TunnelStatus::Error => {
-                        self.logs = vec![
-                            "ERR Unable to establish connection".to_string(),
-                            "ERR Retrying in 5s...".to_string(),
-                        ];
-                    }
+                    TunnelStatus::Error => vec![
+                        "ERR Unable to establish connection".to_string(),
+                        "ERR Retrying in 5s...".to_string(),
+                    ],
                 },
             }
         } else {
-            self.logs = vec!["No tunnel selected".to_string()];
+            return;
+        };
+
+        // Inject demo lines into the log_tails map so render_logs can read them.
+        if let Some(entry) = self.tunnels.get(self.selected) {
+            let name = entry.tunnel.name.clone();
+            // Use a dummy path; seed() won't be called for demo tails.
+            let tail = self.log_tails.entry(name).or_insert_with(|| {
+                crate::tui::log_tail::LogTail::new(std::path::PathBuf::new(), 5000)
+            });
+            tail.inject_lines(lines);
         }
     }
 
@@ -1345,44 +1359,22 @@ impl App {
             self.refresh_demo_logs();
             return;
         }
-        if let Some(entry) = self.tunnels.get(self.selected) {
-            match entry.kind {
-                TunnelKind::Managed => match daemon::read_log_tail(&entry.tunnel, 100) {
-                    Ok(lines) => self.logs = lines,
-                    Err(e) => self.logs = vec![format!("Error reading logs: {}", e)],
-                },
-                TunnelKind::Ephemeral => {
-                    let has_config =
-                        entry.tunnel.target != "unknown" && !entry.tunnel.target.is_empty();
-                    self.logs = if has_config {
-                        vec![
-                            "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
-                            String::new(),
-                            format!("Hostname: {}", entry.tunnel.hostname),
-                            format!("Target:   {}", entry.tunnel.target),
-                            if !entry.tunnel.zone_name.is_empty() {
-                                format!("Zone:     {}", entry.tunnel.zone_name)
-                            } else {
-                                "Zone:     (will prompt)".to_string()
-                            },
-                            String::new(),
-                            "Press [m] to import as managed tunnel".to_string(),
-                            "Press [d] to delete from Cloudflare".to_string(),
-                        ]
-                    } else {
-                        vec![
-                            "Ephemeral tunnel (created with `ytunnel run`)".to_string(),
-                            String::new(),
-                            "Config not found - tunnel may not be running.".to_string(),
-                            String::new(),
-                            "Press [m] to import (will prompt for target)".to_string(),
-                            "Press [d] to delete from Cloudflare".to_string(),
-                        ]
-                    };
-                }
-            }
-        } else {
-            self.logs = vec!["No tunnel selected".to_string()];
+        let Some(entry) = self.tunnels.get(self.selected) else { return };
+        // Only tail log files for managed tunnels; ephemeral tunnels have no log file.
+        if entry.kind != TunnelKind::Managed {
+            return;
+        }
+        let name = entry.tunnel.name.clone();
+        let path = match entry.tunnel.log_path() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if !self.log_tails.contains_key(&name) {
+            let mut tail = crate::tui::log_tail::LogTail::new(path, 5000);
+            let _ = tail.seed();
+            self.log_tails.insert(name, tail);
+        } else if let Some(tail) = self.log_tails.get_mut(&name) {
+            let _ = tail.poll();
         }
     }
 
@@ -1580,6 +1572,8 @@ impl App {
     pub fn select_previous(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected > 0 {
             self.selected -= 1;
+            self.log_scroll = 0;
+            self.log_follow = true;
             self.refresh_logs();
             return true; // Selection changed
         }
@@ -1590,10 +1584,38 @@ impl App {
     pub fn select_next(&mut self) -> bool {
         if !self.tunnels.is_empty() && self.selected < self.tunnels.len() - 1 {
             self.selected += 1;
+            self.log_scroll = 0;
+            self.log_follow = true;
             self.refresh_logs();
             return true; // Selection changed
         }
         false
+    }
+
+    // Scroll log view up (toward older lines)
+    pub fn scroll_logs_up(&mut self, n: u16) {
+        self.log_scroll = self.log_scroll.saturating_add(n);
+        self.log_follow = false;
+    }
+
+    // Scroll log view down (toward newer lines)
+    pub fn scroll_logs_down(&mut self, n: u16) {
+        self.log_scroll = self.log_scroll.saturating_sub(n);
+        if self.log_scroll == 0 {
+            self.log_follow = true;
+        }
+    }
+
+    // Jump to the bottom (newest) line and re-enable auto-follow
+    pub fn scroll_logs_bottom(&mut self) {
+        self.log_scroll = 0;
+        self.log_follow = true;
+    }
+
+    // Jump to the top (oldest) line; render clamps to actual buffer size
+    pub fn scroll_logs_top(&mut self) {
+        self.log_scroll = u16::MAX;
+        self.log_follow = false;
     }
 
     // Check if selected tunnel needs a health check (unknown or stale)
@@ -2232,7 +2254,9 @@ async fn run_app(
                             }
                         }
                         KeyCode::Char('d') => {
-                            if !app.demo_guard() {
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                app.scroll_logs_down(5);
+                            } else if !app.demo_guard() {
                                 app.request_delete();
                             }
                         }
@@ -2366,6 +2390,13 @@ async fn run_app(
                             if let Err(e) = app.load_tunnels().await {
                                 app.status_message = Some(format!("Error: {}", e));
                             }
+                        }
+                        KeyCode::PageUp => app.scroll_logs_up(10),
+                        KeyCode::PageDown => app.scroll_logs_down(10),
+                        KeyCode::Home => app.scroll_logs_top(),
+                        KeyCode::End => app.scroll_logs_bottom(),
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            app.scroll_logs_up(5);
                         }
                         _ => {}
                     },

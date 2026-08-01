@@ -351,45 +351,31 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {
-    let title = if let Some(entry) = app.tunnels.get(app.selected) {
-        format!(" Logs: {} ", entry.tunnel.name)
-    } else {
-        " Logs ".to_string()
+    let name = app.tunnels.get(app.selected).map(|e| e.tunnel.name.clone());
+
+    let all_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
+        Some(tail) if !tail.is_empty() => tail.lines().map(String::from).collect(),
+        Some(_) => vec!["No logs yet".to_string()],
+        None => vec!["No tunnel selected".to_string()],
     };
 
-    // Take last N lines that fit in the area
-    let available_height = area.height.saturating_sub(2) as usize; // -2 for borders
-    let start = if app.logs.len() > available_height {
-        app.logs.len() - available_height
+    // Determine visible slice based on scroll offset.
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total = all_lines.len();
+    let scroll = (app.log_scroll as usize).min(total.saturating_sub(1));
+    let end = total.saturating_sub(scroll);
+    let start = end.saturating_sub(visible_height);
+    let visible = &all_lines[start..end];
+
+    let log_lines: Vec<Line> = visible.iter().map(|l| Line::from(l.as_str())).collect();
+
+    let title = if app.log_follow {
+        format!(" Logs ({}) ", total)
     } else {
-        0
+        format!(" Logs ({} — scrolled, End to follow) ", total)
     };
-
-    let log_lines: Vec<Line> = app.logs[start..]
-        .iter()
-        .map(|line| {
-            let color = if line.contains("ERR") {
-                Color::Red
-            } else if line.contains("WRN") {
-                Color::Yellow
-            } else if line.contains("INF") {
-                Color::Green
-            } else {
-                Color::Gray
-            };
-            Line::from(Span::styled(line.clone(), Style::default().fg(color)))
-        })
-        .collect();
-
     let logs = Paragraph::new(log_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .wrap(Wrap { trim: false });
-
+        .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(logs, area);
 }
 
