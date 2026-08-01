@@ -485,6 +485,7 @@ mod tests {
             metrics_port: None,
             tunnel_options: BTreeMap::new(),
             origin_request: BTreeMap::new(),
+            log_mode: crate::state::LogMode::Default,
         };
         tunnel.tunnel_options.insert("loglevel".into(), TunnelOptionValue::String("debug".into()));
         tunnel.origin_request.insert(
@@ -638,6 +639,7 @@ mod tests {
             metrics_port: None,
             tunnel_options: BTreeMap::new(),
             origin_request: BTreeMap::new(),
+            log_mode: crate::state::LogMode::Default,
         };
         tunnel.tunnel_options.insert(
             "some-future-flag".into(),

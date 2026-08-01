@@ -35,6 +35,32 @@ pub enum TunnelOptionValue {
     List(Vec<String>),
 }
 
+// User-selected log mode: cloudflared verbosity + ytunnel display filter.
+// Default: cloudflared at info, raw display. Debug: cloudflared at debug, raw
+// display (verbose, includes headers). NgrokDev: cloudflared at debug, parsed
+// display (compact per-request rows via crate::tui::log_filter).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogMode {
+    #[default]
+    Default,
+    Debug,
+    NgrokDev,
+}
+
+impl LogMode {
+    pub fn is_default(&self) -> bool {
+        matches!(self, LogMode::Default)
+    }
+    // The cloudflared loglevel value this mode implies. None => omit from YAML.
+    pub fn to_cloudflared_loglevel(&self) -> Option<&'static str> {
+        match self {
+            LogMode::Default => None,
+            LogMode::Debug | LogMode::NgrokDev => Some("debug"),
+        }
+    }
+}
+
 // A persistent tunnel configuration stored in tunnels.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentTunnel {
@@ -62,6 +88,10 @@ pub struct PersistentTunnel {
     // Attached to the ingress rule as `originRequest:` in the generated YAML.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub origin_request: BTreeMap<String, TunnelOptionValue>,
+    // Log verbosity + display filter. Default = cloudflared info, raw display.
+    // See LogMode for details.
+    #[serde(default, skip_serializing_if = "LogMode::is_default")]
+    pub log_mode: LogMode,
 }
 
 impl PersistentTunnel {
@@ -111,6 +141,20 @@ pub struct TunnelState {
     pub tunnels: Vec<PersistentTunnel>,
 }
 
+// If a tunnel has tunnel_options["loglevel"] set (from before log_mode
+// existed), promote it to the first-class log_mode field and remove the
+// map entry. Preserves the user's intent across the schema change.
+pub fn migrate_loglevel_to_log_mode(state: &mut TunnelState) {
+    for tunnel in &mut state.tunnels {
+        if let Some(TunnelOptionValue::String(s)) = tunnel.tunnel_options.get("loglevel") {
+            if s == "debug" && tunnel.log_mode.is_default() {
+                tunnel.log_mode = LogMode::Debug;
+            }
+            tunnel.tunnel_options.remove("loglevel");
+        }
+    }
+}
+
 impl TunnelState {
     // Load the tunnel state from disk
     pub fn load() -> Result<Self> {
@@ -133,16 +177,30 @@ impl TunnelState {
     pub fn load_and_migrate(default_account: &str) -> Result<Self> {
         let mut state = Self::load()?;
 
-        // Check if any tunnels need migration
-        let needs_migration = state.tunnels.iter().any(|t| t.account_name.is_empty());
+        // Check if any tunnels need account_name migration
+        let needs_account_migration = state.tunnels.iter().any(|t| t.account_name.is_empty());
 
-        if needs_migration {
+        if needs_account_migration {
             for tunnel in &mut state.tunnels {
                 if tunnel.account_name.is_empty() {
                     tunnel.account_name = default_account.to_string();
                 }
             }
-            // Save the migrated state
+        }
+
+        // Check if any tunnels have a legacy loglevel tunnel_option that should
+        // be promoted to the first-class log_mode field.
+        let needs_loglevel_migration = state
+            .tunnels
+            .iter()
+            .any(|t| t.tunnel_options.contains_key("loglevel"));
+
+        if needs_loglevel_migration {
+            migrate_loglevel_to_log_mode(&mut state);
+        }
+
+        // Save once if any migration ran
+        if needs_account_migration || needs_loglevel_migration {
             state.save()?;
         }
 
@@ -353,12 +411,20 @@ pub fn build_tunnel_yaml(
 // Generate the cloudflared config YAML content for a tunnel.
 pub fn generate_tunnel_config(tunnel: &PersistentTunnel) -> Result<String> {
     let credentials_path = tunnel.credentials_path()?;
+    // Merge log_mode's implied loglevel into tunnel_options for YAML emission.
+    let mut effective_options = tunnel.tunnel_options.clone();
+    if let Some(level) = tunnel.log_mode.to_cloudflared_loglevel() {
+        effective_options.insert(
+            "loglevel".to_string(),
+            TunnelOptionValue::String(level.to_string()),
+        );
+    }
     build_tunnel_yaml(
         &tunnel.tunnel_id,
         &credentials_path,
         &tunnel.hostname,
         &tunnel.target,
-        &tunnel.tunnel_options,
+        &effective_options,
         &tunnel.origin_request,
     )
 }
@@ -433,7 +499,68 @@ mod tests {
             metrics_port: Some(21000),
             tunnel_options: BTreeMap::new(),
             origin_request: BTreeMap::new(),
+            log_mode: LogMode::Default,
         }
+    }
+
+    #[test]
+    fn log_mode_defaults_to_default() {
+        let tunnel: PersistentTunnel = toml::from_str(r#"
+            name = "demo"
+            account_name = "acct"
+            target = "http://localhost:3000"
+            zone_id = "z"
+            zone_name = "example.com"
+            hostname = "demo.example.com"
+            tunnel_id = "uuid"
+            enabled = true
+        "#).unwrap();
+        assert_eq!(tunnel.log_mode, LogMode::Default);
+    }
+
+    #[test]
+    fn log_mode_debug_emits_loglevel_in_yaml() {
+        let mut tunnel = sample_tunnel();
+        tunnel.log_mode = LogMode::Debug;
+        let yaml = generate_tunnel_config(&tunnel).unwrap();
+        assert!(yaml.contains("\nloglevel: \"debug\"\n"), "expected loglevel line:\n{yaml}");
+    }
+
+    #[test]
+    fn log_mode_ngrok_dev_emits_loglevel_in_yaml() {
+        let mut tunnel = sample_tunnel();
+        tunnel.log_mode = LogMode::NgrokDev;
+        let yaml = generate_tunnel_config(&tunnel).unwrap();
+        assert!(yaml.contains("\nloglevel: \"debug\"\n"));
+    }
+
+    #[test]
+    fn log_mode_default_does_not_emit_loglevel() {
+        let tunnel = sample_tunnel();
+        let yaml = generate_tunnel_config(&tunnel).unwrap();
+        assert!(!yaml.contains("loglevel"));
+    }
+
+    #[test]
+    fn migration_moves_legacy_loglevel_to_log_mode() {
+        let toml = r#"
+            [[tunnels]]
+            name = "demo"
+            account_name = "acct"
+            target = "http://localhost:3000"
+            zone_id = "z"
+            zone_name = "example.com"
+            hostname = "demo.example.com"
+            tunnel_id = "uuid"
+            enabled = true
+
+            [tunnels.tunnel_options]
+            loglevel = "debug"
+        "#;
+        let mut state: TunnelState = toml::from_str(toml).unwrap();
+        migrate_loglevel_to_log_mode(&mut state);
+        assert_eq!(state.tunnels[0].log_mode, LogMode::Debug);
+        assert!(!state.tunnels[0].tunnel_options.contains_key("loglevel"));
     }
 
     #[test]

@@ -541,6 +541,7 @@ async fn cmd_add(
         metrics_port: None,
         tunnel_options: std::collections::BTreeMap::new(),
         origin_request: std::collections::BTreeMap::new(),
+        log_mode: crate::state::LogMode::Default,
     };
 
     // Write tunnel config
