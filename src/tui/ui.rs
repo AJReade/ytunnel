@@ -352,11 +352,28 @@ fn render_tunnels(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_logs(f: &mut Frame, app: &App, area: Rect) {
     let name = app.tunnels.get(app.selected).map(|e| e.tunnel.name.clone());
+    let log_mode = app.tunnels.get(app.selected)
+        .map(|e| e.tunnel.log_mode)
+        .unwrap_or_default();
 
-    let all_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
+    let raw_lines: Vec<String> = match name.as_deref().and_then(|n| app.log_tails.get(n)) {
         Some(tail) if !tail.is_empty() => tail.lines().map(String::from).collect(),
         Some(_) => vec!["No logs yet".to_string()],
         None => vec!["No tunnel selected".to_string()],
+    };
+
+    let all_lines: Vec<String> = if log_mode == crate::state::LogMode::NgrokDev {
+        let filtered: Vec<String> = raw_lines.iter()
+            .filter_map(|l| crate::tui::log_filter::parse_line(l))
+            .map(|req| crate::tui::log_filter::format_ngrok(&req))
+            .collect();
+        if filtered.is_empty() && !raw_lines.is_empty() {
+            vec!["(ngrok-dev: no HTTP requests yet — hit a URL on your tunnel to see them appear)".to_string()]
+        } else {
+            filtered
+        }
+    } else {
+        raw_lines
     };
 
     // Determine visible slice based on scroll offset.
@@ -369,10 +386,15 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 
     let log_lines: Vec<Line> = visible.iter().map(|l| Line::from(l.as_str())).collect();
 
+    let mode_tag = match log_mode {
+        crate::state::LogMode::Default => "",
+        crate::state::LogMode::Debug => " [debug]",
+        crate::state::LogMode::NgrokDev => " [ngrok-dev]",
+    };
     let title = if app.log_follow {
-        format!(" Logs ({}) ", total)
+        format!(" Logs{} ({}) ", mode_tag, total)
     } else {
-        format!(" Logs ({} — scrolled, End to follow) ", total)
+        format!(" Logs{} ({} — scrolled, End to follow) ", mode_tag, total)
     };
     let logs = Paragraph::new(log_lines)
         .block(Block::default().borders(Borders::ALL).title(title));
