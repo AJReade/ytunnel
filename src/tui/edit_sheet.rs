@@ -68,6 +68,12 @@ impl EditSheetState {
     }
 
     // Apply sheet state back onto a PersistentTunnel.
+    //
+    // Registry-authoritative semantics: both `tunnel_options` and
+    // `origin_request` are rebuilt from `advanced_rows`. Any pre-existing keys
+    // that don't correspond to an entry in `OPTIONS` are dropped. This is
+    // intentional per the design spec (no free-form YAML editing) — options
+    // must be added to the registry to be preserved through an edit cycle.
     pub fn apply(&self, tunnel: &mut PersistentTunnel) {
         tunnel.target = self.target.clone();
         tunnel.zone_name = self.zone_name.clone();
@@ -204,5 +210,45 @@ mod tests {
         assert_eq!(s.active_tab, SheetTab::Advanced);
         s.toggle_tab();
         assert_eq!(s.active_tab, SheetTab::Basic);
+    }
+
+    #[test]
+    fn apply_discards_keys_not_in_registry() {
+        // A tunnel that has a `tunnel_options`/`origin_request` key our registry
+        // doesn't know about (e.g. hand-edited tunnels.toml, or an older ytunnel
+        // version that supported an option we've since removed).
+        let mut tunnel = PersistentTunnel {
+            name: "demo".into(),
+            account_name: "acct".into(),
+            target: "http://localhost:3000".into(),
+            zone_id: "zone123".into(),
+            zone_name: "example.com".into(),
+            hostname: "demo.example.com".into(),
+            tunnel_id: "uuid-1".into(),
+            enabled: true,
+            auto_start: false,
+            metrics_port: None,
+            tunnel_options: BTreeMap::new(),
+            origin_request: BTreeMap::new(),
+        };
+        tunnel.tunnel_options.insert(
+            "some-future-flag".into(),
+            TunnelOptionValue::Bool(true),
+        );
+        tunnel.origin_request.insert(
+            "unknownOriginKnob".into(),
+            TunnelOptionValue::String("x".into()),
+        );
+
+        // Sheet built from the tunnel does NOT contain the unknown keys as rows
+        // (rows come from OPTIONS, not from the tunnel's maps).
+        let sheet = EditSheetState::from_tunnel(&tunnel);
+        assert!(sheet.advanced_rows.iter().all(|r| r.spec.yaml_key != "some-future-flag"));
+        assert!(sheet.advanced_rows.iter().all(|r| r.spec.yaml_key != "unknownOriginKnob"));
+
+        // Applying the sheet back onto the tunnel drops those unknown keys.
+        sheet.apply(&mut tunnel);
+        assert!(!tunnel.tunnel_options.contains_key("some-future-flag"));
+        assert!(!tunnel.origin_request.contains_key("unknownOriginKnob"));
     }
 }
