@@ -1,8 +1,9 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -288,6 +289,35 @@ async fn delete_tunnel_op(
 }
 
 // Save the edit sheet state: apply to tunnel, persist to disk, reload daemon if running
+// Route a mouse event based on which pane the cursor is over. Left 40% of the
+// terminal width is the tunnels list; right 60% is the log pane (matches the
+// horizontal layout in ui::render). Click sets focus, scroll wheel scrolls
+// or navigates whichever pane the cursor is over.
+fn handle_mouse(app: &mut App, mouse: MouseEvent, term_width: u16) {
+    let split_col = (term_width as u32 * 40 / 100) as u16;
+    let over_logs = mouse.column >= split_col;
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.focus = if over_logs { Focus::Logs } else { Focus::Tunnels };
+        }
+        MouseEventKind::ScrollUp => {
+            if over_logs {
+                app.scroll_logs_up(3);
+            } else {
+                app.select_previous();
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if over_logs {
+                app.scroll_logs_down(3);
+            } else {
+                app.select_next();
+            }
+        }
+        _ => {}
+    }
+}
+
 async fn save_edit_sheet(app: &mut App) {
     let Some(sheet) = app.edit_sheet.clone() else { return };
 
@@ -1975,7 +2005,7 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1997,7 +2027,8 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -2009,7 +2040,7 @@ pub async fn run_demo_tui() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2025,7 +2056,8 @@ pub async fn run_demo_tui() -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -2091,6 +2123,16 @@ async fn run_app(
                 continue;
             }
 
+            // Handle mouse events: click sets focus based on which pane was hit;
+            // scroll wheel routes to the pane the cursor is currently over.
+            // Left panel = tunnels list (left 40% of terminal width); right = logs.
+            if let Event::Mouse(mouse) = &event {
+                if app.input_mode == InputMode::Normal {
+                    handle_mouse(app, *mouse, terminal.size()?.width);
+                }
+                continue;
+            }
+
             if let Event::Key(key) = event {
                 // Handle key press and repeat events (repeat needed for remote desktop)
                 // Skip release events
@@ -2111,7 +2153,8 @@ async fn run_app(
                     execute!(
                         terminal.backend_mut(),
                         LeaveAlternateScreen,
-                        DisableBracketedPaste
+                        DisableBracketedPaste,
+                        DisableMouseCapture
                     )?;
                     terminal.show_cursor()?;
 
@@ -2128,7 +2171,8 @@ async fn run_app(
                     execute!(
                         terminal.backend_mut(),
                         EnterAlternateScreen,
-                        EnableBracketedPaste
+                        EnableBracketedPaste,
+                        EnableMouseCapture
                     )?;
                     // Force full redraw
                     terminal.clear()?;

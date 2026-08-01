@@ -432,18 +432,37 @@ fn render_logs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 // Color raw cloudflared lines by level marker. Matches the original palette
-// (ERR red, WRN yellow, INF green) plus a bright fallback for DBG and other
-// lines so they stay readable.
+// (ERR red, WRN yellow, INF green) plus HTTP status-class coloring for DBG
+// response lines (2xx green, 3xx cyan, 4xx yellow, 5xx magenta). Everything
+// else stays white for readability.
 fn raw_line_style(line: &str) -> Style {
     if line.contains("ERR") {
-        Style::default().fg(Color::Red)
-    } else if line.contains("WRN") {
-        Style::default().fg(Color::Yellow)
-    } else if line.contains("INF") {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::White)
+        return Style::default().fg(Color::Red);
     }
+    if line.contains("WRN") {
+        return Style::default().fg(Color::Yellow);
+    }
+    if line.contains("INF") {
+        return Style::default().fg(Color::Green);
+    }
+    // DBG response lines look like "... DBG 200 OK ..." or "... DBG 302 Found ...".
+    // Peek at the token right after " DBG "; if it's a 3-digit ASCII number, color
+    // by status class. Otherwise it's a DBG request (GET/POST/...) or noise → white.
+    if let Some(after_dbg) = line.split(" DBG ").nth(1) {
+        if let Some(first_token) = after_dbg.split_whitespace().next() {
+            if first_token.len() == 3 && first_token.chars().all(|c| c.is_ascii_digit()) {
+                let class = first_token.chars().next().unwrap();
+                return match class {
+                    '2' => Style::default().fg(Color::Green),
+                    '3' => Style::default().fg(Color::Cyan),
+                    '4' => Style::default().fg(Color::Yellow),
+                    '5' => Style::default().fg(Color::Magenta),
+                    _ => Style::default().fg(Color::White),
+                };
+            }
+        }
+    }
+    Style::default().fg(Color::White)
 }
 
 // Color ngrok-dev formatted rows by HTTP status class (2xx green, 3xx cyan,
