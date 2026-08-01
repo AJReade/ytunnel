@@ -7,7 +7,11 @@
 - **Edit UI overhaul** — replaces the previous target → zone chained modal with a single overlay sheet. Press `e` on a tunnel to open, `Tab` to switch between Basic and Advanced, `Ctrl+S` to save, `Esc` to cancel (with dirty-state confirm).
 - **YAML generator extended** — top-level cloudflared options and per-ingress `originRequest` blocks are now emitted when set. Tunnels with no advanced options still produce byte-identical legacy YAML output.
 - **Zone editing restored** — the Basic tab now lets you pick a different zone for a tunnel. Zone changes trigger Cloudflare DNS reconciliation automatically (old CNAME removed, new one created) before config is persisted.
-- No new dependencies added.
+- **Scrollable log panel** — `PgUp`/`PgDn` page through history, `Ctrl+U`/`Ctrl+D` half-page, `Home`/`End` top/bottom. Buffer holds the last 5000 lines. New lines auto-scroll to the bottom; scrolling up pauses auto-scroll until `End`.
+- **Live log tail** — the log panel now polls the file every second and reads only newly-appended bytes, so cloudflared events appear live instead of only on tunnel actions.
+- **Log mode picker on Basic tab** — pick `Default` (cloudflared info level), `Debug` (verbose, includes headers), or `ngrok-dev` (compact per-request table). `loglevel` is no longer in the Advanced options list — set it via Log mode instead. Existing tunnels with `loglevel: debug` in `tunnels.toml` are auto-migrated to `Log mode = Debug` on next load.
+- **ngrok-dev mode** — parses cloudflared's debug log stream into one line per HTTP request: `HH:MM:SS  METHOD  path  conn=N`. Skips edge-discovery, connection registration, and other non-request noise. Note: cloudflared doesn't log response status or duration at any level, so those fields are absent.
+- No new dependencies added (`tempfile` added as dev-only for LogTail tests).
 
 ### v0.8.0
 
