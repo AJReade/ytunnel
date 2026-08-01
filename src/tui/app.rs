@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent,
         MouseEventKind,
     },
     execute,
@@ -289,31 +289,14 @@ async fn delete_tunnel_op(
 }
 
 // Save the edit sheet state: apply to tunnel, persist to disk, reload daemon if running
-// Route a mouse event based on which pane the cursor is over. Left 40% of the
-// terminal width is the tunnels list; right 60% is the log pane (matches the
-// horizontal layout in ui::render). Click sets focus, scroll wheel scrolls
-// or navigates whichever pane the cursor is over.
-fn handle_mouse(app: &mut App, mouse: MouseEvent, term_width: u16) {
-    let split_col = (term_width as u32 * 40 / 100) as u16;
-    let over_logs = mouse.column >= split_col;
+// Route a mouse event to the log pane. Mouse capture is only enabled while
+// focus is on Logs (see Tab handler), so any mouse event we receive here is
+// implicitly for the log pane. Scroll wheel scrolls; clicks are ignored so
+// they don't interfere with anything.
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            app.focus = if over_logs { Focus::Logs } else { Focus::Tunnels };
-        }
-        MouseEventKind::ScrollUp => {
-            if over_logs {
-                app.scroll_logs_up(3);
-            } else {
-                app.select_previous();
-            }
-        }
-        MouseEventKind::ScrollDown => {
-            if over_logs {
-                app.scroll_logs_down(3);
-            } else {
-                app.select_next();
-            }
-        }
+        MouseEventKind::ScrollUp => app.scroll_logs_up(3),
+        MouseEventKind::ScrollDown => app.scroll_logs_down(3),
         _ => {}
     }
 }
@@ -2005,7 +1988,9 @@ pub async fn run_tui(initial_account: Option<&str>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+    // Mouse capture starts OFF — text selection works with native drag.
+    // It's toggled ON only when Tab focuses the log pane (see Tab handler).
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2040,7 +2025,9 @@ pub async fn run_demo_tui() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
+    // Mouse capture starts OFF — text selection works with native drag.
+    // It's toggled ON only when Tab focuses the log pane (see Tab handler).
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -2128,7 +2115,7 @@ async fn run_app(
             // Left panel = tunnels list (left 40% of terminal width); right = logs.
             if let Event::Mouse(mouse) = &event {
                 if app.input_mode == InputMode::Normal {
-                    handle_mouse(app, *mouse, terminal.size()?.width);
+                    handle_mouse(app, *mouse);
                 }
                 continue;
             }
@@ -2166,14 +2153,17 @@ async fn run_app(
                         }
                     }
 
-                    // When resumed, restore terminal
+                    // When resumed, restore terminal. Mouse capture is only
+                    // re-enabled if focus is still on Logs.
                     enable_raw_mode()?;
                     execute!(
                         terminal.backend_mut(),
                         EnterAlternateScreen,
-                        EnableBracketedPaste,
-                        EnableMouseCapture
+                        EnableBracketedPaste
                     )?;
+                    if app.focus == Focus::Logs {
+                        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                    }
                     // Force full redraw
                     terminal.clear()?;
                     continue;
@@ -2422,9 +2412,19 @@ async fn run_app(
                             app.input_mode = InputMode::Help;
                         }
                         KeyCode::Tab => {
+                            // Toggle focus AND terminal mouse capture: capture is
+                            // on only when Logs are focused, so users can drag to
+                            // select text in the terminal whenever focus is on
+                            // the tunnel list.
                             app.focus = match app.focus {
-                                Focus::Tunnels => Focus::Logs,
-                                Focus::Logs => Focus::Tunnels,
+                                Focus::Tunnels => {
+                                    execute!(terminal.backend_mut(), EnableMouseCapture)?;
+                                    Focus::Logs
+                                }
+                                Focus::Logs => {
+                                    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+                                    Focus::Tunnels
+                                }
                             };
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
