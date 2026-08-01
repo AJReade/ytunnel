@@ -490,9 +490,28 @@ fn commit_basic_input_edit(app: &mut App) {
                 sheet.metrics_port = None;
                 sheet.dirty = true;
             }
+            BasicField::LogMode => {
+                // LogMode uses a picker; this branch should not be reached.
+            }
         }
     }
     app.input_mode = InputMode::EditSheet;
+}
+
+fn log_mode_to_index(m: crate::state::LogMode) -> usize {
+    match m {
+        crate::state::LogMode::Default => 0,
+        crate::state::LogMode::Debug => 1,
+        crate::state::LogMode::NgrokDev => 2,
+    }
+}
+
+fn log_mode_from_index(i: usize) -> crate::state::LogMode {
+    match i {
+        1 => crate::state::LogMode::Debug,
+        2 => crate::state::LogMode::NgrokDev,
+        _ => crate::state::LogMode::Default,
+    }
 }
 
 // Parse an ephemeral tunnel's config file to extract hostname and target
@@ -550,6 +569,7 @@ pub enum InputMode {
     EditSheetBasicInput { field: crate::tui::edit_sheet::BasicField, buffer: String },
     EditSheetPicker { yaml_key: String, cursor: usize },
     EditSheetZonePicker { cursor: usize },
+    EditSheetLogModePicker { cursor: usize },
     EditSheetConfirmDiscard,
     Confirm,
     Help,
@@ -2617,6 +2637,12 @@ async fn run_app(
                                                     buffer,
                                                 };
                                             }
+                                            4 => {
+                                                let cursor = app.edit_sheet.as_ref()
+                                                    .map(|s| log_mode_to_index(s.log_mode))
+                                                    .unwrap_or(0);
+                                                app.input_mode = InputMode::EditSheetLogModePicker { cursor };
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -2746,6 +2772,34 @@ async fn run_app(
                                             s.pending_zone = Some(zone);
                                             s.dirty = true;
                                         }
+                                    }
+                                }
+                            }
+                            app.input_mode = InputMode::EditSheet;
+                        }
+                        _ => {}
+                    },
+                    InputMode::EditSheetLogModePicker { .. } => match key.code {
+                        KeyCode::Esc => app.input_mode = InputMode::EditSheet,
+                        KeyCode::Up => {
+                            if let InputMode::EditSheetLogModePicker { cursor } = &mut app.input_mode {
+                                *cursor = cursor.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let InputMode::EditSheetLogModePicker { cursor } = &mut app.input_mode {
+                                if *cursor + 1 < 3 {
+                                    *cursor += 1;
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let InputMode::EditSheetLogModePicker { cursor } = &app.input_mode {
+                                let mode = log_mode_from_index(*cursor);
+                                if let Some(s) = app.edit_sheet.as_mut() {
+                                    if s.log_mode != mode {
+                                        s.log_mode = mode;
+                                        s.dirty = true;
                                     }
                                 }
                             }

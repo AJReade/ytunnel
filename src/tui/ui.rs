@@ -103,6 +103,7 @@ pub fn render(f: &mut Frame, app: &App) {
         | InputMode::EditSheetBasicInput { .. }
         | InputMode::EditSheetPicker { .. }
         | InputMode::EditSheetZonePicker { .. }
+        | InputMode::EditSheetLogModePicker { .. }
         | InputMode::EditSheetConfirmDiscard => {
             if let Some(sheet) = app.edit_sheet.as_ref() {
                 crate::tui::edit_sheet::render(f, f.area(), sheet);
@@ -623,6 +624,9 @@ fn render_help_bar(f: &mut Frame, app: &App, area: Rect) {
         InputMode::EditSheetZonePicker { .. } => {
             " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
         }
+        InputMode::EditSheetLogModePicker { .. } => {
+            " ↑/↓: select   Enter: confirm   Esc: cancel".to_string()
+        }
         InputMode::EditSheetConfirmDiscard => " y: discard   n/Esc: keep editing".to_string(),
         InputMode::Confirm => " y confirm  n/Esc cancel".to_string(),
         InputMode::Help => " Press Esc or ? to close help".to_string(),
@@ -761,6 +765,7 @@ fn basic_field_human_name(field: crate::tui::edit_sheet::BasicField) -> &'static
         BasicField::Zone => "Zone",
         BasicField::AutoStart => "Auto-start",
         BasicField::MetricsPort => "Metrics port",
+        BasicField::LogMode => "Log mode",
     }
 }
 
@@ -864,6 +869,29 @@ fn render_sheet_modal_overlays(f: &mut Frame, app: &App) {
                     Style::default().fg(Color::Gray)
                 };
                 ListItem::new(Span::styled(format!("{}{}", marker, z.name), style))
+            }).collect();
+            f.render_widget(List::new(items), inner);
+        }
+        InputMode::EditSheetLogModePicker { cursor } => {
+            let choices = ["Default", "Debug", "ngrok-dev"];
+            let area = centered_rect(30, 30, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(yellow)
+                .title(Span::styled(" Choose log mode ", bold_yellow))
+                .padding(padding);
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let items: Vec<ListItem> = choices.iter().enumerate().map(|(i, c)| {
+                let is_sel = i == *cursor;
+                let marker = if is_sel { "› " } else { "  " };
+                let style = if is_sel {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                ListItem::new(Span::styled(format!("{}{}", marker, c), style))
             }).collect();
             f.render_widget(List::new(items), inner);
         }

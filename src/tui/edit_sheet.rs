@@ -23,6 +23,7 @@ pub enum BasicField {
     Zone = 1,
     AutoStart = 2,
     MetricsPort = 3,
+    LogMode = 4,
 }
 
 // A single editable row in the Advanced tab.
@@ -43,9 +44,11 @@ pub struct EditSheetState {
     pub zone_name: String,
     pub auto_start: bool,
     pub metrics_port: Option<u16>,
+    // Log mode value staged for save. Defaults to the tunnel's current value.
+    pub log_mode: crate::state::LogMode,
     pub advanced_rows: Vec<AdvancedRow>,
     pub selected_row: usize,
-    // Index of the currently-selected Basic tab field (0-3, maps to BasicField).
+    // Index of the currently-selected Basic tab field (0-4, maps to BasicField).
     pub basic_selected: usize,
     // True when any field diverges from the original tunnel.
     pub dirty: bool,
@@ -80,6 +83,7 @@ impl EditSheetState {
             zone_name: tunnel.zone_name.clone(),
             auto_start: tunnel.auto_start,
             metrics_port: tunnel.metrics_port,
+            log_mode: tunnel.log_mode,
             advanced_rows,
             selected_row: 0,
             basic_selected: 0,
@@ -101,6 +105,7 @@ impl EditSheetState {
         tunnel.target = self.target.clone();
         tunnel.auto_start = self.auto_start;
         tunnel.metrics_port = self.metrics_port;
+        tunnel.log_mode = self.log_mode;
 
         if let Some(zone) = &self.pending_zone {
             tunnel.zone_id = zone.id.clone();
@@ -154,9 +159,9 @@ impl EditSheetState {
         }
     }
 
-    // Move Basic tab selection down (bounded at last field, index 3).
+    // Move Basic tab selection down (bounded at last field, index 4).
     pub fn select_basic_next(&mut self) {
-        if self.basic_selected < 3 {
+        if self.basic_selected < 4 {
             self.basic_selected += 1;
         }
     }
@@ -263,6 +268,7 @@ fn basic_field_description(idx: usize) -> &'static str {
         1 => "Cloudflare zone hosting the tunnel hostname. Enter to pick a zone — DNS records are reconciled automatically on save.",
         2 => "Auto-start on login via launchd (macOS) / systemd (Linux). Enter toggles.",
         3 => "Local port for cloudflared's Prometheus metrics endpoint. Blank = auto-assigned.",
+        4 => "Cloudflared log verbosity + ytunnel display filter. 'ngrok-dev' shows a compact per-request table (requires debug internally).",
         _ => "",
     }
 }
@@ -325,9 +331,14 @@ fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
                 value_style,
             ),
         ]),
+        Line::from(vec![
+            marker_span(4),
+            Span::styled("Log mode:     ", label_style),
+            Span::styled(log_mode_label(sheet.log_mode), value_style),
+        ]),
     ];
 
-    // Summary of configured Advanced options below the four Basic fields.
+    // Summary of configured Advanced options below the five Basic fields.
     let mut all_lines = lines;
     all_lines.push(Line::from(""));
     all_lines.push(Line::from(Span::styled(
@@ -380,6 +391,14 @@ fn render_basic(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
     }
 
     f.render_widget(Paragraph::new(all_lines), area);
+}
+
+fn log_mode_label(m: crate::state::LogMode) -> &'static str {
+    match m {
+        crate::state::LogMode::Default => "Default",
+        crate::state::LogMode::Debug => "Debug",
+        crate::state::LogMode::NgrokDev => "ngrok-dev",
+    }
 }
 
 fn render_advanced(f: &mut Frame, area: Rect, sheet: &EditSheetState) {
@@ -487,7 +506,6 @@ mod tests {
             origin_request: BTreeMap::new(),
             log_mode: crate::state::LogMode::Default,
         };
-        tunnel.tunnel_options.insert("loglevel".into(), TunnelOptionValue::String("debug".into()));
         tunnel.origin_request.insert(
             "httpHostHeader".into(),
             TunnelOptionValue::String("foo.local".into()),
@@ -499,9 +517,6 @@ mod tests {
     fn from_tunnel_populates_advanced_rows_with_current_values() {
         let tunnel = tunnel_with_options();
         let sheet = EditSheetState::from_tunnel(&tunnel);
-
-        let loglevel_row = sheet.advanced_rows.iter().find(|r| r.spec.yaml_key == "loglevel").unwrap();
-        assert!(matches!(&loglevel_row.value, Some(TunnelOptionValue::String(s)) if s == "debug"));
 
         let host_row = sheet.advanced_rows.iter().find(|r| r.spec.yaml_key == "httpHostHeader").unwrap();
         assert!(matches!(&host_row.value, Some(TunnelOptionValue::String(s)) if s == "foo.local"));
@@ -517,7 +532,6 @@ mod tests {
 
         for row in &mut sheet.advanced_rows {
             match row.spec.yaml_key {
-                "loglevel" => row.value = None,
                 "retries" => row.value = Some(TunnelOptionValue::Int(10)),
                 _ => {}
             }
@@ -526,7 +540,6 @@ mod tests {
         let mut applied = tunnel.clone();
         sheet.apply(&mut applied);
 
-        assert!(!applied.tunnel_options.contains_key("loglevel"));
         assert!(matches!(applied.tunnel_options.get("retries"), Some(TunnelOptionValue::Int(10))));
         assert!(applied.origin_request.contains_key("httpHostHeader"));
     }
@@ -535,7 +548,8 @@ mod tests {
     fn clear_selected_removes_value_and_marks_dirty() {
         let tunnel = tunnel_with_options();
         let mut sheet = EditSheetState::from_tunnel(&tunnel);
-        let idx = sheet.advanced_rows.iter().position(|r| r.spec.yaml_key == "loglevel").unwrap();
+        // Use httpHostHeader (origin_request) as a set row to clear.
+        let idx = sheet.advanced_rows.iter().position(|r| r.spec.yaml_key == "httpHostHeader").unwrap();
         sheet.selected_row = idx;
 
         sheet.clear_selected();
@@ -552,12 +566,16 @@ mod tests {
         s.select_basic_next();
         s.select_basic_next();
         assert_eq!(s.basic_selected, 3);
-        // Bounded at 3 (last field: MetricsPort).
+        // Can navigate to index 4 (LogMode).
         s.select_basic_next();
-        assert_eq!(s.basic_selected, 3);
+        assert_eq!(s.basic_selected, 4);
+        // Bounded at 4 (last field: LogMode).
+        s.select_basic_next();
+        assert_eq!(s.basic_selected, 4);
         s.select_basic_prev();
-        assert_eq!(s.basic_selected, 2);
+        assert_eq!(s.basic_selected, 3);
         // Bounded at 0.
+        s.select_basic_prev();
         s.select_basic_prev();
         s.select_basic_prev();
         s.select_basic_prev();
@@ -572,6 +590,21 @@ mod tests {
         assert_eq!(BasicField::Zone as u8, 1);
         assert_eq!(BasicField::AutoStart as u8, 2);
         assert_eq!(BasicField::MetricsPort as u8, 3);
+    }
+
+    #[test]
+    fn basic_field_log_mode_is_index_4() {
+        assert_eq!(BasicField::LogMode as u8, 4);
+    }
+
+    #[test]
+    fn select_basic_bounds_extended_to_4() {
+        let mut s = EditSheetState::from_tunnel(&tunnel_with_options());
+        s.basic_selected = 3;
+        s.select_basic_next();
+        assert_eq!(s.basic_selected, 4);
+        s.select_basic_next(); // Should bound at 4.
+        assert_eq!(s.basic_selected, 4);
     }
 
     #[test]
