@@ -1980,8 +1980,10 @@ async fn run_app(
 ) -> Result<()> {
     let mut last_metrics_refresh = std::time::Instant::now();
     let mut last_health_check = std::time::Instant::now();
+    let mut last_logs_refresh = std::time::Instant::now();
     let metrics_refresh_interval = Duration::from_secs(5);
     let health_check_interval = Duration::from_secs(30);
+    let logs_refresh_interval = Duration::from_secs(1);
 
     loop {
         terminal.draw(|f| ui::render(f, app))?;
@@ -1999,6 +2001,13 @@ async fn run_app(
         if !app.spinner.is_active() && last_health_check.elapsed() >= health_check_interval {
             app.check_all_health().await;
             last_health_check = std::time::Instant::now();
+        }
+
+        // Tail the log file for the selected tunnel every second so new lines
+        // appear live instead of only on start/stop/import.
+        if !app.spinner.is_active() && last_logs_refresh.elapsed() >= logs_refresh_interval {
+            app.refresh_logs();
+            last_logs_refresh = std::time::Instant::now();
         }
 
         // Poll for events - use shorter timeout when spinner is active for smooth animation
