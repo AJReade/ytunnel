@@ -54,16 +54,8 @@ pub struct OptionSpec {
 
 pub const OPTIONS: &[OptionSpec] = &[
     // --- Tunnel scope ---
-    OptionSpec {
-        yaml_key: "loglevel",
-        scope: OptionScope::Tunnel,
-        display_name: "Log level",
-        description: "Application logging verbosity.",
-        kind: OptionKind::Enum {
-            default: Some("info"),
-            choices: &["debug", "info", "warn", "error", "fatal"],
-        },
-    },
+    // Note: `loglevel` is intentionally omitted here — it's promoted to a
+    // first-class field on the Basic edit tab via `LogMode`. See `src/state.rs`.
     OptionSpec {
         yaml_key: "transport-loglevel",
         scope: OptionScope::Tunnel,
@@ -484,7 +476,8 @@ mod tests {
 
     #[test]
     fn validate_enum_membership() {
-        let spec = find("loglevel").unwrap();
+        // Use transport-loglevel now that loglevel is out of the Advanced registry.
+        let spec = find("transport-loglevel").unwrap();
         assert!(validate_value(spec, &TunnelOptionValue::String("debug".into())).is_ok());
         assert!(validate_value(spec, &TunnelOptionValue::String("verbose".into())).is_err());
     }
