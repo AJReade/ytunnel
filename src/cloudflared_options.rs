@@ -37,6 +37,7 @@ pub enum OptionKind {
         choices: &'static [&'static str],
     },
     // Newline-separated list in the UI; serialized as a YAML sequence.
+    // No `default` field — absence from the map is the effective default.
     List {
         placeholder: &'static str,
     },
@@ -397,13 +398,22 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
                 other => return Err(format!("bad unit: {}", other)),
             }
         };
-        total += match unit {
+        let segment = match unit {
             "ms" => std::time::Duration::from_millis(n),
             "s" => std::time::Duration::from_secs(n),
-            "m" => std::time::Duration::from_secs(n * 60),
-            "h" => std::time::Duration::from_secs(n * 3600),
+            "m" => n
+                .checked_mul(60)
+                .map(std::time::Duration::from_secs)
+                .ok_or_else(|| format!("value too large: {}m", n))?,
+            "h" => n
+                .checked_mul(3600)
+                .map(std::time::Duration::from_secs)
+                .ok_or_else(|| format!("value too large: {}h", n))?,
             _ => unreachable!(),
         };
+        total = total
+            .checked_add(segment)
+            .ok_or_else(|| "duration sum overflowed".to_string())?;
     }
     if !buf.is_empty() {
         return Err(format!("trailing digits without unit: {}", buf));
@@ -444,8 +454,16 @@ mod tests {
         assert_eq!(parse_duration("30s").unwrap().as_secs(), 30);
         assert_eq!(parse_duration("1m").unwrap().as_secs(), 60);
         assert_eq!(parse_duration("1m30s").unwrap().as_secs(), 90);
+        assert_eq!(parse_duration("1h2m3s").unwrap().as_secs(), 3723);
         assert_eq!(parse_duration("2h").unwrap().as_secs(), 7200);
         assert_eq!(parse_duration("500ms").unwrap().as_millis(), 500);
+    }
+
+    #[test]
+    fn parse_duration_rejects_overflow() {
+        // u64::MAX seconds converted from minutes would overflow.
+        let huge = format!("{}m", u64::MAX);
+        assert!(parse_duration(&huge).is_err(), "should reject overflowing value");
     }
 
     #[test]
